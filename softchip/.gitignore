@@ -1,0 +1,6 @@
+# Compiled binaries
+ternary_bench
+ternary_bench_v2
+*.so
+*.o
+*.dylib

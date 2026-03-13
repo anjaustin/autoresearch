@@ -106,6 +106,71 @@ The backward pass through 2.41B parameters on a Ryzen 5 CPU takes 208 seconds. T
 
 3. **What is the minimum parameter count that produces meaningful improvement?** TinyLoRA achieved 91% GSM8K with 13 params on Qwen2.5-8B. The equivalent number for BitNet is unknown.
 
+## AVX2 Soft-Chip: Ternary Matmul Kernel
+
+### Motivation
+
+The 208-second backward pass and 12-second forward pass on CPU are dominated by matrix multiplications through BitNet's `AutoBitLinear` layers. BitNet's ternary weights ({-1, 0, +1}) mean these matmuls don't need any multiplication -- just add, subtract, or skip. PyTorch doesn't exploit this; it runs standard BF16 matmul.
+
+We built a hand-tuned AVX2 "soft-chip" kernel that exploits the ternary structure.
+
+### Architecture Insights from BitNet Internals
+
+Inspection of `AutoBitLinear` revealed:
+- `online_quant=True`: BF16 master weights are quantized to ternary via `WeightQuant` (absmean) in the forward pass
+- Activations are quantized to symmetric INT8 via `ActQuant` (per-token absmax scaling)
+- Backward pass uses Straight-Through Estimator (STE) -- gradients pass through quantization unchanged
+- Weight distribution post-quantization: ~51% zeros, ~24.5% +1, ~24.5% -1
+
+### Kernel Design
+
+**Weight packing:** 2 bits per weight (00=zero, 01=+1, 11=-1), 4 weights per byte. A 2560x2560 weight matrix packs to 1.6MB -- fits in L2 cache.
+
+**AVX2 inner loop (v2, LUT-based):**
+1. Precompute 256-entry LUTs mapping each byte (4 ternary values) to nonzero masks and sign masks (4KB each, fits L1)
+2. Per 8-element chunk: two LUT lookups -> 8-element nonzero and sign masks
+3. XOR activations with sign mask (flips sign for -1 weights)
+4. AND with nonzero mask (zeros out where weight is 0)
+5. Accumulate via `_mm256_add_ps`
+
+No multiply instruction in the hot path. 51% of elements are zero -- free.
+
+**Activation quantization:** Vectorized symmetric INT8 simulation matching BitNet's `ActQuant`.
+
+### Benchmark Results
+
+Single layer forward pass (M=19, K=2560, N=2560):
+
+| Implementation | Time | Throughput | Speedup vs PyTorch |
+|---|---|---|---|
+| PyTorch BF16 (BitNet forward) | 53.5 ms | 4.7 GFLOP/s eq | 1x (baseline) |
+| Soft-chip v1 (scalar decode) | 221.1 ms | 1.1 GFLOP/s eq | 0.24x |
+| **Soft-chip v2 (LUT + AVX2)** | **13.2 ms** | **18.9 GFLOP/s eq** | **4.1x** |
+
+v1 to v2 improvement: **16.8x** (eliminating scalar unpacking from the hot path).
+
+### Projected Full Model Impact
+
+| Metric | PyTorch | Soft-chip v2 (projected) |
+|---|---|---|
+| Full 30-layer forward pass | ~12s | ~3s |
+| GRPO rollout (200 tokens) | ~200-600s | ~50-150s |
+| Overnight experiments (8h) | ~3-5 experiments | ~12-20 experiments |
+
+The soft-chip accelerates inference (rollout generation) by ~4x. The backward pass still uses PyTorch (STE requires BF16 matmul against master weights, not ternary), so training speed improves less. But for the autoresearch loop, rollout generation is the bottleneck.
+
+### Source
+
+- `softchip/ternary_matmul.c` -- v1 prototype (scalar decode, 221ms)
+- `softchip/ternary_matmul_v2.c` -- v2 production (LUT + AVX2, 13.2ms)
+
+```bash
+# Compile and benchmark
+gcc -O3 -mavx2 -mfma -march=native -fopenmp -DSTANDALONE_TEST \
+    -o softchip/ternary_bench_v2 softchip/ternary_matmul_v2.c -lm
+./softchip/ternary_bench_v2
+```
+
 ## Next Steps
 
 ### Phase 1: Thor Deployment
