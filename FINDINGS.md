@@ -249,6 +249,8 @@ All 210 layers' packed weights total **497 MB** -- fits in the 512 MB dedicated 
 
 ### Shader Design
 
+#### v2 (proof-of-concept)
+
 Vulkan GLSL compute shader with branchless ternary decode:
 - 2-bit weight codes: bit0 = nonzero flag, bit1 = sign flag
 - `contribution = activation * float(code & 1) * (1.0 - 2.0 * float(code >> 1))`
@@ -256,51 +258,73 @@ Vulkan GLSL compute shader with branchless ternary decode:
 - Activation vector loaded into shared memory (LDS) via collaborative workgroup load
 - RADV (Mesa Vulkan) driver on Linux, no ROCm required
 
-### Benchmark Results (Proof of Concept)
+#### v3 (optimized)
 
-Single layer (M=1, K=2560, N=2560):
+LMM Pass 4 analysis identified the GPU as **memory-bound** (1.3% of peak FP32). A/B testing of 4 shader variants revealed:
+
+1. **Transposed weight layout (REJECTED):** Cross-thread coalescing improved, but strided sequential reads within each thread destroyed L2 prefetch. Net: slower than row-major for scalar loop, marginal with vec4.
+2. **XOR+AND bit trick (ADOPTED):** Eliminates float multiply from inner loop. `uintBitsToFloat((act ^ sign_mask) & nz_mask)` — all single-cycle VALU ops. Significant win.
+3. **Fully unrolled vec4 processing (ADOPTED):** Process all 16 weights per uint32 in 4 groups of 4, eliminating the inner loop entirely. 4 independent accumulators enable instruction-level parallelism.
+4. **LDS right-sizing via specialization constants (ADOPTED):** Two pipeline variants (2560: 10 KB LDS → 60% occupancy; 6912: 27 KB LDS → 20% occupancy).
+
+The winning shader (v3) keeps v2's **row-major weight layout** but uses the bit trick, full unrolling, and LDS sizing. The key insight: on this GPU, reducing instruction count and improving instruction-level parallelism matters more than memory coalescing.
+
+### Benchmark Results
+
+#### v2 (proof-of-concept, 2560×2560 only)
 
 | Method | Time | Throughput | vs CPU |
 |--------|------|-----------|--------|
 | CPU soft-chip v3 (AVX2) | 1.56 ms | 8.4 GFLOP/s | 1x |
-| GPU individual submit | 1.04 ms | 12.7 GFLOP/s | **1.5x** |
-| **GPU batched (7 dispatch)** | **0.61 ms** | **21.6 GFLOP/s** | **2.6x** |
+| GPU v2 individual submit | 1.04 ms | 12.7 GFLOP/s | 1.5x |
+| GPU v2 batched (7 dispatch) | 0.61 ms | 21.6 GFLOP/s | 2.6x |
 
-Vulkan submit overhead: ~0.43 ms per submission. Batching 7 dispatches (one decoder layer's 7 matmuls) into a single command buffer amortizes this.
+#### v3 (optimized, all layer shapes)
 
-### Projected Full Model Impact
+| Layer | Shape | Batched (ms) | GFLOP/s eq | vs v2 |
+|-------|-------|-------------|-----------|-------|
+| **q_proj / o_proj** | 2560×2560 | **0.30** | **43.8** | **2.0x** |
+| k_proj / v_proj | 640×2560 | 0.12 | 27.3 | — |
+| gate_proj / up_proj | 6912×2560 | 0.88 | 40.0 | — |
+| down_proj | 2560×6912 | 1.44 | 24.6 | — |
 
-| Metric | CPU soft-chip | GPU Vulkan (projected) | Speedup |
-|--------|--------------|----------------------|---------|
-| Full 30-layer forward (M=1) | 910 ms | ~140 ms | **~6.5x** |
-| 200-token rollout | 182 s (3 min) | ~28 s | **~6.5x** |
+All 4 layer shapes pass numerical validation (NRMSE < 2e-6 vs CPU reference).
 
-This is with a **naive first-cut shader** (no vec4 loads, no subgroup ops, no LDS tiling). With optimization, 2-4x further improvement is expected, potentially reaching ~35-70ms per forward pass (~10-25x vs CPU).
+#### Projected Full Model Forward (M=1)
+
+Per decoder layer kernel time: q(0.30) + k(0.12) + v(0.12) + o(0.30) + gate(0.88) + up(0.88) + down(1.44) = **4.05 ms**
+
+| Metric | CPU soft-chip | GPU v2 (projected) | GPU v3 (projected) |
+|--------|--------------|-------------------|-------------------|
+| 30-layer kernel time | 910 ms | ~128 ms | **~121 ms** |
+| + submit overhead (120 submits) | — | ~52 ms | ~36 ms |
+| **Total forward (M=1)** | **910 ms** | **~180 ms** | **~157 ms** |
+| **200-token rollout** | **182 s (3 min)** | **~36 s** | **~31 s** |
+| vs stock PyTorch (4200 ms) | 4.6x | ~23x | **~27x** |
 
 ### Source
 
-- `softchip/ternary_matmul.comp` -- Vulkan GLSL compute shader
-- `softchip/ternary_matmul.spv` -- Compiled SPIR-V
-- `softchip/vk_ternary.c` -- Vulkan dispatch harness + benchmark
+- `softchip/ternary_matmul.comp` -- v2 Vulkan GLSL shader (proof-of-concept, kept for reference)
+- `softchip/ternary_matmul_v3.comp` -- v3 optimized shader (production)
+- `softchip/vk_ternary.c` -- v2 dispatch harness + benchmark
+- `softchip/vk_ternary_v3.c` -- v3 dispatch harness + multi-shape benchmark
 
 ```bash
-# Compile shader
-glslangValidator -V softchip/ternary_matmul.comp -o softchip/ternary_matmul.spv
+# Compile v3 shader
+glslangValidator -V softchip/ternary_matmul_v3.comp -o softchip/ternary_matmul_v3.spv
 
-# Compile and run benchmark
-gcc -O2 -o softchip/vk_ternary softchip/vk_ternary.c -lvulkan -lm -ldl
-VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json ./softchip/vk_ternary
+# Compile and run v3 benchmark
+gcc -O2 -o softchip/vk_ternary_v3 softchip/vk_ternary_v3.c -lvulkan -lm -ldl
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json ./softchip/vk_ternary_v3
 ```
 
 ## Next Steps
 
-### Phase 0: iGPU Shader Optimization (NEXT — LMM analysis complete, implementation pending)
-- Implement transposed weight packing in Vulkan harness
-- Rewrite shader v3: transposed layout + XOR+AND bit trick + vec4 processing
-- Add specialization constants for LDS right-sizing (2560 vs 6912 variants)
-- Batch q+k+v and gate+up dispatches into single command buffer submissions
+### Phase 0: iGPU Integration (NEXT)
 - Wire optimized Vulkan path into Python/PyTorch (`patch_model` with GPU backend)
-- Target: 0.15-0.25 ms/layer, 45-65ms full model, 10-13s for 200-token rollout
+- Batch independent matmuls (q+k+v, gate+up) into single command buffer submissions
+- End-to-end benchmark: full model forward through Vulkan, compare output logits to CPU path
+- 200-token rollout benchmark to confirm ~31s target
 
 ### Phase 1: Thor Deployment
 - Port validation code + soft-chip to Jetson AGX Thor (128GB unified memory, Blackwell GPU)
@@ -348,9 +372,9 @@ python bench_softchip_model.py      # Full model benchmark
 
 # Build and benchmark soft-chip GPU kernel (requires Vulkan + AMD iGPU)
 sudo apt-get install libvulkan-dev glslang-tools mesa-vulkan-drivers
-glslangValidator -V softchip/ternary_matmul.comp -o softchip/ternary_matmul.spv
-gcc -O2 -o softchip/vk_ternary softchip/vk_ternary.c -lvulkan -lm -ldl
-VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json ./softchip/vk_ternary
+glslangValidator -V softchip/ternary_matmul_v3.comp -o softchip/ternary_matmul_v3.spv
+gcc -O2 -o softchip/vk_ternary_v3 softchip/vk_ternary_v3.c -lvulkan -lm -ldl
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json ./softchip/vk_ternary_v3
 ```
 
 ## LMM Analysis
@@ -377,9 +401,8 @@ The pivot from LFM2-24B to BitNet b1.58 was driven by the REFLECT phase identify
 
 ### Pass 4: iGPU Shader Optimization
 - `journal/igpu_opt_raw.md` through `journal/igpu_opt_synth.md`
-- Key finding: GPU is **memory-bound** (1.3% of peak), opposite of CPU (compute-bound at 9% of peak)
-- Primary bottleneck: uncoalesced weight reads — consecutive wavefront threads access different rows at stride=640 bytes, causing 64 cache lines per wavefront read instead of 1
-- #1 optimization: **transposed weight layout** — makes consecutive threads access consecutive memory (coalesced reads), potentially 3-6x improvement
-- Secondary: LDS right-sizing (20% → 60% occupancy), XOR+AND bit trick, vec4 processing
-- Target: 0.15-0.25 ms/layer → full model ~45-65ms → 200-token rollout ~10-13 seconds
-- Decision: implement all four optimizations as single v3 shader rewrite; skip FP16 Rapid Packed Math (uncertain RADV support) and cooperative dot product (transposed layout solves coalescing without threading model rewrite)
+- Analysis predicted: GPU is memory-bound (1.3% of peak), transposed layout would be the #1 optimization
+- **A/B testing overturned this:** transposed layout hurt sequential L2 prefetch more than it helped cross-thread coalescing. Row-major + bit trick + full unrolling was 2x faster.
+- Winning optimizations: XOR+AND bit trick (no float multiply), fully unrolled 16-weight decode, specialization constants for LDS sizing
+- Result: 2560×2560 batched 0.30 ms (2.0x over v2), full model projected ~157 ms (5.8x over CPU)
+- Key lesson: on this GPU, instruction-level parallelism and L2 sequential prefetch matter more than cross-thread memory coalescing for our access pattern
