@@ -115,21 +115,29 @@ static struct {
     VkCommandBuffer cmd_buf;
     VkFence fence;
 
-    VkDescriptorPool desc_pool;
+    VkDescriptorPool desc_pool;       /* For pre-allocated per-layer descriptor sets */
+    VkDescriptorPool batch_desc_pool; /* For temporary batch descriptor sets */
 
     /* Activation and output staging buffers (shared, resized as needed) */
     VkBuffer act_buf;
     VkDeviceMemory act_mem;
     size_t act_capacity;
+    void *act_mapped;           /* Persistently mapped activation pointer */
 
     VkBuffer out_buf;
     VkDeviceMemory out_mem;
     size_t out_capacity;
+    void *out_mapped;           /* Persistently mapped output pointer */
 
     /* For batch: multiple output buffers */
     VkBuffer batch_out_bufs[MAX_BATCH];
     VkDeviceMemory batch_out_mems[MAX_BATCH];
     size_t batch_out_caps[MAX_BATCH];
+    void *batch_out_mapped[MAX_BATCH];  /* Persistently mapped */
+
+    /* Pre-allocated descriptor sets for all layers (avoid alloc/reset per dispatch) */
+    VkDescriptorSet layer_desc_sets[MAX_LAYERS];
+    int desc_sets_allocated;
 
     LayerState layers[MAX_LAYERS];
     int num_layers;
@@ -187,6 +195,20 @@ static int ensure_buffer(VkBuffer *buf, VkDeviceMemory *mem, size_t *cap, size_t
     int rc = create_buffer(buf, mem, needed);
     if (rc == 0) *cap = needed;
     return rc;
+}
+
+/* Ensure buffer with persistent mapping */
+static int ensure_buffer_mapped(VkBuffer *buf, VkDeviceMemory *mem, size_t *cap,
+                                 void **mapped, size_t needed) {
+    if (*cap >= needed) return 0;
+    if (*mapped) { vkUnmapMemory(G.device, *mem); *mapped = NULL; }
+    destroy_buffer(buf, mem);
+    int rc = create_buffer(buf, mem, needed);
+    if (rc != 0) return rc;
+    *cap = needed;
+    VkResult r = vkMapMemory(G.device, *mem, 0, needed, 0, mapped);
+    if (r != VK_SUCCESS) { *mapped = NULL; return -1; }
+    return 0;
 }
 
 static uint32_t *load_spirv(const char *path, size_t *out_size) {
@@ -383,15 +405,23 @@ int vk_init(const char *spv_path) {
     VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
     VK_CHECK(vkCreateFence(G.device, &fi, NULL, &G.fence));
 
-    /* Descriptor pool (generous: enough for many descriptor sets) */
-    VkDescriptorPoolSize dps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 256 };
+    /* Descriptor pool for pre-allocated per-layer sets */
+    VkDescriptorPoolSize dps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_LAYERS * 3 };
     VkDescriptorPoolCreateInfo dpi = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-        .maxSets = 64,
+        .maxSets = MAX_LAYERS,
         .poolSizeCount = 1, .pPoolSizes = &dps,
     };
     VK_CHECK(vkCreateDescriptorPool(G.device, &dpi, NULL, &G.desc_pool));
+
+    /* Separate descriptor pool for batch dispatch (resettable) */
+    VkDescriptorPoolSize dps2 = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_BATCH * 3 };
+    VkDescriptorPoolCreateInfo dpi2 = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = MAX_BATCH,
+        .poolSizeCount = 1, .pPoolSizes = &dps2,
+    };
+    VK_CHECK(vkCreateDescriptorPool(G.device, &dpi2, NULL, &G.batch_desc_pool));
 
     G.initialized = 1;
     G.num_layers = 0;
@@ -442,6 +472,123 @@ int vk_alloc_layer(const uint32_t *packed_weights, int out_features, int in_feat
 }
 
 /**
+ * Ensure layer has a pre-allocated descriptor set.
+ * Called once per layer; descriptor set is reused across dispatches
+ * by updating it when activation/output buffer addresses change.
+ */
+static int ensure_layer_desc_set(int layer_id) {
+    if (G.desc_sets_allocated) return 0;  /* Already allocated for all layers */
+    return 0;  /* Will be allocated in finalize_layers() */
+}
+
+/**
+ * Track last bound buffers to avoid redundant descriptor set updates.
+ */
+static VkBuffer last_act_buf = VK_NULL_HANDLE;
+static VkBuffer last_out_buf = VK_NULL_HANDLE;
+
+static void update_desc_set_io(int layer_id);  /* Forward declaration */
+
+/**
+ * Pre-allocate descriptor sets for all layers and set weight bindings.
+ * Call after all layers have been uploaded.
+ */
+int vk_finalize_layers(void) {
+    if (!G.initialized || G.num_layers == 0) return -1;
+    if (G.desc_sets_allocated) return 0;
+
+    /* Find max dimensions to pre-allocate act/out buffers */
+    size_t max_act = 0, max_out = 0;
+    for (int i = 0; i < G.num_layers; i++) {
+        size_t ab = G.layers[i].in_features * sizeof(float);
+        size_t ob = G.layers[i].out_features * sizeof(float);
+        if (ab > max_act) max_act = ab;
+        if (ob > max_out) max_out = ob;
+    }
+
+    /* Pre-allocate activation and output buffers (avoids resize during dispatch) */
+    if (ensure_buffer(&G.act_buf, &G.act_mem, &G.act_capacity, max_act) != 0) return -1;
+    if (ensure_buffer(&G.out_buf, &G.out_mem, &G.out_capacity, max_out) != 0) return -1;
+
+    /* Allocate descriptor sets for all layers */
+    VkDescriptorSetLayout layouts[MAX_LAYERS];
+    for (int i = 0; i < G.num_layers; i++) layouts[i] = G.desc_layout;
+
+    VkDescriptorSetAllocateInfo dai = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = G.desc_pool,
+        .descriptorSetCount = G.num_layers,
+        .pSetLayouts = layouts,
+    };
+    VK_CHECK(vkAllocateDescriptorSets(G.device, &dai, G.layer_desc_sets));
+
+    /* Bind weight + activation + output buffers for all layers */
+    for (int i = 0; i < G.num_layers; i++) {
+        LayerState *ls = &G.layers[i];
+        VkDescriptorBufferInfo bi[3] = {
+            { ls->weight_buf, 0, ls->weight_bytes },
+            { G.act_buf, 0, VK_WHOLE_SIZE },
+            { G.out_buf, 0, VK_WHOLE_SIZE },
+        };
+        VkWriteDescriptorSet wr[3];
+        for (int j = 0; j < 3; j++) {
+            wr[j] = (VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = G.layer_desc_sets[i], .dstBinding = j, .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &bi[j],
+            };
+        }
+        vkUpdateDescriptorSets(G.device, 3, wr, 0, NULL);
+    }
+
+    /* Mark buffers as bound so update_desc_set_io won't re-update */
+    last_act_buf = G.act_buf;
+    last_out_buf = G.out_buf;
+
+    G.desc_sets_allocated = 1;
+    return 0;
+}
+
+/**
+ * Update activation and output buffer bindings for a layer's descriptor set.
+ * Uses VK_WHOLE_SIZE so all layers can share the same descriptor set bindings
+ * regardless of their actual data size (shader uses push constants for dimensions).
+ * Only updates when the underlying Vulkan buffer handle changes (after resize).
+ */
+static void update_desc_set_io(int layer_id) {
+    /* Only update if buffer handles changed (i.e., after a resize) */
+    if (G.act_buf == last_act_buf && G.out_buf == last_out_buf) return;
+
+    last_act_buf = G.act_buf;
+    last_out_buf = G.out_buf;
+
+    /* Update ALL layer descriptor sets since the buffer handles changed */
+    for (int i = 0; i < G.num_layers; i++) {
+        if (!G.layer_desc_sets[i]) continue;
+        VkDescriptorBufferInfo bi[2] = {
+            { G.act_buf, 0, VK_WHOLE_SIZE },
+            { G.out_buf, 0, VK_WHOLE_SIZE },
+        };
+        VkWriteDescriptorSet wr[2] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = G.layer_desc_sets[i], .dstBinding = 1, .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &bi[0],
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = G.layer_desc_sets[i], .dstBinding = 2, .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &bi[1],
+            },
+        };
+        vkUpdateDescriptorSets(G.device, 2, wr, 0, NULL);
+    }
+}
+
+/**
  * Run a single ternary matmul on the GPU.
  *
  * layer_id: from vk_alloc_layer()
@@ -468,31 +615,49 @@ int vk_dispatch(int layer_id, const float *activation, float *output) {
     memcpy(mapped, activation, act_bytes);
     vkUnmapMemory(G.device, G.act_mem);
 
-    /* Allocate descriptor set */
-    VkDescriptorSetAllocateInfo dai = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool = G.desc_pool,
-        .descriptorSetCount = 1,
-        .pSetLayouts = &G.desc_layout,
-    };
-    VkDescriptorSet ds;
-    VK_CHECK(vkAllocateDescriptorSets(G.device, &dai, &ds));
-
-    VkDescriptorBufferInfo bi[3] = {
-        { ls->weight_buf, 0, ls->weight_bytes },
-        { G.act_buf, 0, act_bytes },
-        { G.out_buf, 0, out_bytes },
-    };
-    VkWriteDescriptorSet wr[3];
-    for (int i = 0; i < 3; i++) {
-        wr[i] = (VkWriteDescriptorSet){
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = ds, .dstBinding = i, .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .pBufferInfo = &bi[i],
+    /* Allocate descriptor set on first use per layer (lazy finalization) */
+    if (!G.layer_desc_sets[layer_id]) {
+        VkDescriptorSetAllocateInfo dai = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = G.desc_pool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &G.desc_layout,
         };
+        VK_CHECK(vkAllocateDescriptorSets(G.device, &dai, &G.layer_desc_sets[layer_id]));
+
+        /* Bind weight buffer (never changes) */
+        VkDescriptorBufferInfo wbi = { ls->weight_buf, 0, ls->weight_bytes };
+        VkWriteDescriptorSet wwr = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = G.layer_desc_sets[layer_id], .dstBinding = 0, .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &wbi,
+        };
+        vkUpdateDescriptorSets(G.device, 1, &wwr, 0, NULL);
     }
-    vkUpdateDescriptorSets(G.device, 3, wr, 0, NULL);
+
+    /* Always update activation and output bindings (exact sizes per layer) */
+    {
+        VkDescriptorBufferInfo bi[2] = {
+            { G.act_buf, 0, act_bytes },
+            { G.out_buf, 0, out_bytes },
+        };
+        VkWriteDescriptorSet wr[2] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = G.layer_desc_sets[layer_id], .dstBinding = 1, .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &bi[0],
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = G.layer_desc_sets[layer_id], .dstBinding = 2, .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &bi[1],
+            },
+        };
+        vkUpdateDescriptorSets(G.device, 2, wr, 0, NULL);
+    }
 
     /* Select pipeline based on in_features */
     VkPipeline pipe = (ls->in_features <= 2560) ? G.pipe_2560 : G.pipe_6912;
@@ -506,12 +671,15 @@ int vk_dispatch(int layer_id, const float *activation, float *output) {
     uint32_t wgs = (ls->out_features + 255) / 256;
 
     /* Record and submit */
-    VkCommandBufferBeginInfo begin = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    VkCommandBufferBeginInfo begin = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
     VK_CHECK(vkResetCommandBuffer(G.cmd_buf, 0));
     VK_CHECK(vkBeginCommandBuffer(G.cmd_buf, &begin));
     vkCmdBindPipeline(G.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
     vkCmdBindDescriptorSets(G.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            G.pipeline_layout, 0, 1, &ds, 0, NULL);
+                            G.pipeline_layout, 0, 1, &G.layer_desc_sets[layer_id], 0, NULL);
     vkCmdPushConstants(G.cmd_buf, G.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
                        0, sizeof(pc), &pc);
     vkCmdDispatch(G.cmd_buf, wgs, 1, 1);
@@ -530,8 +698,7 @@ int vk_dispatch(int layer_id, const float *activation, float *output) {
     memcpy(output, mapped, out_bytes);
     vkUnmapMemory(G.device, G.out_mem);
 
-    /* Reset descriptor pool for reuse */
-    vkResetDescriptorPool(G.device, G.desc_pool, 0);
+    /* Descriptor sets are reused across dispatches (no reset needed) */
 
     return 0;
 }
@@ -584,7 +751,7 @@ int vk_dispatch_batch(const int *layer_ids, int count, const float *activation,
 
     VkDescriptorSetAllocateInfo dai = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool = G.desc_pool,
+        .descriptorPool = G.batch_desc_pool,
         .descriptorSetCount = count,
         .pSetLayouts = layouts,
     };
@@ -615,7 +782,10 @@ int vk_dispatch_batch(const int *layer_ids, int count, const float *activation,
     }
 
     /* Record command buffer with all dispatches */
-    VkCommandBufferBeginInfo begin = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    VkCommandBufferBeginInfo begin = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
     VK_CHECK(vkResetCommandBuffer(G.cmd_buf, 0));
     VK_CHECK(vkBeginCommandBuffer(G.cmd_buf, &begin));
 
@@ -658,8 +828,8 @@ int vk_dispatch_batch(const int *layer_ids, int count, const float *activation,
         vkUnmapMemory(G.device, G.batch_out_mems[i]);
     }
 
-    /* Reset descriptor pool */
-    vkResetDescriptorPool(G.device, G.desc_pool, 0);
+    /* Reset batch descriptor pool (doesn't affect pre-allocated layer sets) */
+    vkResetDescriptorPool(G.device, G.batch_desc_pool, 0);
 
     return 0;
 }
@@ -679,16 +849,20 @@ void vk_shutdown(void) {
         }
     }
 
-    /* Free staging buffers */
+    /* Unmap and free staging buffers */
+    if (G.act_mapped) { vkUnmapMemory(G.device, G.act_mem); G.act_mapped = NULL; }
+    if (G.out_mapped) { vkUnmapMemory(G.device, G.out_mem); G.out_mapped = NULL; }
     destroy_buffer(&G.act_buf, &G.act_mem);
     destroy_buffer(&G.out_buf, &G.out_mem);
     for (int i = 0; i < MAX_BATCH; i++) {
+        if (G.batch_out_mapped[i]) { vkUnmapMemory(G.device, G.batch_out_mems[i]); G.batch_out_mapped[i] = NULL; }
         destroy_buffer(&G.batch_out_bufs[i], &G.batch_out_mems[i]);
     }
 
     vkDestroyFence(G.device, G.fence, NULL);
     vkDestroyCommandPool(G.device, G.cmd_pool, NULL);
     vkDestroyDescriptorPool(G.device, G.desc_pool, NULL);
+    vkDestroyDescriptorPool(G.device, G.batch_desc_pool, NULL);
     vkDestroyPipeline(G.device, G.pipe_2560, NULL);
     vkDestroyPipeline(G.device, G.pipe_6912, NULL);
     vkDestroyPipelineLayout(G.device, G.pipeline_layout, NULL);

@@ -368,7 +368,30 @@ All backends produce identical top-5 predictions: [" Paris", " not", " a", " the
 
 Full-model NRMSE is higher than per-layer (~4e-3) because quantization differences accumulate through 30 decoder layers (210 matmuls). The key result: all backends agree on functional output (same top-k predictions) and Vulkan is perfectly deterministic.
 
-**Note on forward time:** Vulkan (1801 ms) is similar to CPU (1762 ms) rather than the projected ~157 ms because the current Python `ctypes` integration adds per-dispatch overhead through 210 individual calls. The raw shader benchmarks (0.30 ms for 2560×2560) are 5.8x faster than CPU; the gap is in Python dispatch overhead, not shader performance. Batching all 7 matmuls per decoder layer into single command buffers would close this gap.
+#### Full Model Forward and Generation Benchmark
+
+Detailed profiling revealed that **Vulkan submit/fence overhead dominates**, making the iGPU path slower than the CPU soft-chip for end-to-end inference. Each of the 210 dispatches pays ~1ms submit overhead regardless of shader compute time.
+
+| Metric | Stock PyTorch | CPU Soft-Chip | Vulkan Soft-Chip |
+|--------|--------------|--------------|-----------------|
+| **Forward (6 tokens)** | **11568 ms** | **1328 ms (8.7x)** | **2654 ms (4.4x)** |
+| Matmul time | — | 1181 ms | 2577 ms |
+| Non-matmul time | — | 147 ms | 77 ms |
+| **Per-token (M=1)** | — | **579 ms** | **628 ms** |
+| **200-token estimate** | — | **116s** | **126s** |
+| Tokens/sec | — | **1.7** | **1.6** |
+
+The CPU soft-chip **wins** because:
+1. **Zero submit overhead**: CPU kernel is a direct function call with memory access. Vulkan requires command buffer record → queue submit → fence wait → readback per dispatch, costing ~1ms each.
+2. **210 submits × ~1ms = ~210ms** of pure overhead, exceeding the total CPU kernel time for many layer shapes.
+3. **Batching helps but can't close the gap**: Even batching q+k+v (3 dispatches → 1 submit) only saves ~0.5ms per decoder block (15ms total for 30 blocks). The remaining 4 serial dispatches per block (o, gate, up, down) still pay individual submit costs.
+
+**Key insight**: The ~157ms projection was based on raw shader times without submit overhead. The actual per-dispatch cost is shader_time + ~1ms_submit. For small layers (k/v at 640×2560, ~0.12ms shader), the overhead is 8x the compute. The Vulkan iGPU path would only win with:
+- A fully GPU-resident execution graph (all ops on GPU, no host round-trips)
+- Timeline semaphores with async readback (eliminate fence wait per dispatch)
+- A GPU with much faster submit path (Jetson Thor's CUDA path is ~10μs submit)
+
+**Decision**: Use CPU soft-chip as the production inference path for the Ryzen development machine. The Vulkan shader work validates the ternary matmul optimization approach and will be directly applicable on the Jetson Thor where CUDA's lower submit overhead and unified memory eliminate the host-device copy bottleneck.
 
 ### Source
 
@@ -380,6 +403,8 @@ Full-model NRMSE is higher than per-layer (~4e-3) because quantization differenc
 - `softchip/torch_ternary.py` -- PyTorch integration (now supports `backend="vulkan"|"cpu"|"auto"`)
 - `softchip/test_vk_backend.py` -- Vulkan backend validation test (per-layer + batch)
 - `test_vk_model.py` -- End-to-end model validation (all 3 backends)
+- `bench_vk_model.py` -- Full model benchmark with generation (forward + autoregressive)
+- `bench_vk_dispatch_overhead.py` -- Dispatch overhead profiler (breakdown by component)
 
 ```bash
 # Compile v3 shader
@@ -401,13 +426,7 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json ./softchip/vk_te
 
 ## Next Steps
 
-### Phase 0: iGPU Integration Optimization (NEXT)
-- Batch all 7 matmuls per decoder layer into single command buffer submissions (reduce Python dispatch overhead)
-- Implement pre-allocated output buffers on GPU side to eliminate host-device copies per dispatch
-- Full model forward benchmark with optimized batching to validate ~157ms projection
-- 200-token rollout benchmark to confirm ~31s target
-
-### Phase 1: Thor Deployment
+### Phase 1: Thor Deployment (NEXT)
 - Port validation code + soft-chip to Jetson AGX Thor (128GB unified memory, Blackwell GPU)
 - Verify GPU-accelerated forward/backward pass (~1-5s expected)
 - Set up bitnet.cpp for fast rollout generation (~35 tok/s on CPU, faster on GPU)
@@ -487,4 +506,6 @@ The pivot from LFM2-24B to BitNet b1.58 was driven by the REFLECT phase identify
 - **A/B testing overturned this:** transposed layout hurt sequential L2 prefetch more than it helped cross-thread coalescing. Row-major + bit trick + full unrolling was 2x faster.
 - Winning optimizations: XOR+AND bit trick (no float multiply), fully unrolled 16-weight decode, specialization constants for LDS sizing
 - Result: 2560×2560 batched 0.30 ms (2.0x over v2), full model projected ~157 ms (5.8x over CPU)
-- Key lesson: on this GPU, instruction-level parallelism and L2 sequential prefetch matter more than cross-thread memory coalescing for our access pattern
+- **Projection vs reality:** The ~157ms projection assumed raw shader times. Actual end-to-end Vulkan forward was 2654ms (210 dispatches × ~1ms submit overhead each). CPU soft-chip (1328ms) is faster than Vulkan for this hardware due to zero-overhead function calls vs GPU submit/fence cycles.
+- Key lesson #1: on this GPU, instruction-level parallelism and L2 sequential prefetch matter more than cross-thread memory coalescing for our access pattern
+- Key lesson #2: Vulkan submit/fence overhead (~1ms/dispatch on RADV/Vega) makes iGPU compute uncompetitive for many small dispatches. The optimization applies when ported to CUDA where submit overhead is ~10μs.

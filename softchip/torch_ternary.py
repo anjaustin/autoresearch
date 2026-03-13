@@ -131,6 +131,9 @@ def _try_load_vulkan():
             ctypes.POINTER(ctypes.POINTER(ctypes.c_float)),
         ]
 
+        _vk_lib.vk_finalize_layers.restype = ctypes.c_int
+        _vk_lib.vk_finalize_layers.argtypes = []
+
         _vk_lib.vk_shutdown.restype = None
         _vk_lib.vk_shutdown.argtypes = []
 
@@ -399,6 +402,12 @@ def patch_model(model, backend="auto", verbose=True):
         count += 1
         if layer_use_vulkan:
             vk_count += 1
+
+    # Finalize Vulkan: pre-allocate descriptor sets for all uploaded layers
+    if use_vulkan and vk_count > 0 and _vk_lib:
+        rc = _vk_lib.vk_finalize_layers()
+        if rc != 0 and verbose:
+            print("  Warning: vk_finalize_layers() failed, using legacy path")
 
     if verbose:
         backend_str = (
