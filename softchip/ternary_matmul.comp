@@ -1,0 +1,78 @@
+#version 450
+
+/*
+ * Vulkan compute shader: ternary matmul for BitNet b1.58
+ *
+ * v2: Branchless decode using bitwise ops (no divergent branches).
+ * Each invocation computes one output element.
+ * Activation vector is loaded into shared memory (LDS) for reuse.
+ *
+ * Weight encoding: 2 bits per weight, 4 per byte, 16 per uint32.
+ *   code[0] (bit 0) = nonzero flag (1 if +1 or -1)
+ *   code[1] (bit 1) = sign flag (1 if -1)
+ *   So: 00=zero, 01=+1, 11=-1
+ *
+ * Branchless decode:
+ *   nz = float(code & 1)           -- 1.0 if nonzero, 0.0 if zero
+ *   sign = 1.0 - 2.0 * float(code >> 1)  -- +1.0 or -1.0
+ *   contribution = activation * nz * sign
+ */
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer PackedWeights {
+    uint packed_w[];
+};
+
+layout(set = 0, binding = 1) readonly buffer Activation {
+    float activation[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer Output {
+    float output_data[];
+};
+
+layout(push_constant) uniform Params {
+    int in_features;
+    int out_features;
+    int packed_row_uints;
+    float weight_scale;
+};
+
+shared float s_act[6912];
+
+void main() {
+    uint n = gl_GlobalInvocationID.x;
+
+    // Collaborative load of activation into shared memory
+    for (uint i = gl_LocalInvocationID.x; i < in_features; i += gl_WorkGroupSize.x) {
+        s_act[i] = activation[i];
+    }
+    barrier();
+
+    if (n >= out_features) return;
+
+    float acc = 0.0;
+    uint row_offset = n * packed_row_uints;
+
+    for (uint i = 0; i < packed_row_uints; i++) {
+        uint word = packed_w[row_offset + i];
+        uint base_k = i * 16;
+
+        // Process 16 weights per uint32, fully unrolled, branchless
+        // For each 2-bit code: bit0 = nonzero, bit1 = sign
+        // contribution = act * (bit0 ? (bit1 ? -1 : +1) : 0)
+        //              = act * float(bit0) * (1 - 2*float(bit1))
+        for (uint j = 0; j < 16; j++) {
+            uint idx = base_k + j;
+            if (idx >= in_features) break;
+
+            uint code = (word >> (j * 2)) & 0x03u;
+            float nz = float(code & 1u);           // 0.0 or 1.0
+            float sign = 1.0 - 2.0 * float(code >> 1u); // +1.0 or -1.0
+            acc += s_act[idx] * nz * sign;
+        }
+    }
+
+    output_data[n] = acc * weight_scale;
+}

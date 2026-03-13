@@ -2,6 +2,8 @@
 ternary_bench
 ternary_bench_v2
 ternary_bench_v3
+vk_ternary
 *.so
 *.o
 *.dylib
+*.spv

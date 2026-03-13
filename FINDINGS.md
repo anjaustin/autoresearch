@@ -224,9 +224,83 @@ python test_softchip_accuracy.py
 python bench_softchip_model.py
 ```
 
+## Vulkan iGPU Soft-Chip: Vega 7 Compute
+
+### Discovery
+
+The Ryzen 5 PRO 5675U has a Vega 7 iGPU (7 CUs, 448 shaders, 1800 MHz, GCN 5 / GFX9) with 1.61 TFLOPS peak FP32 -- 7.6x more raw compute than the CPU's AVX2 path. We built a Vulkan compute shader proof-of-concept to exploit this.
+
+### iGPU Specs
+
+| Spec | Value |
+|------|-------|
+| Architecture | GCN 5 (Vega), GFX9 |
+| Compute Units | 7 |
+| Shaders | 448 |
+| Max clock | 1800 MHz |
+| FP32 peak | 1.61 TFLOPS |
+| LDS (shared memory) | 64 KB per CU |
+| VRAM (dedicated) | 512 MB (carved from system RAM) |
+| Memory | Shared DDR4-3200 dual-channel (~51 GB/s, shared with CPU) |
+
+### Key Feasibility Insight
+
+All 210 layers' packed weights total **497 MB** -- fits in the 512 MB dedicated VRAM by 15 MB. The activation vector (10-27 KB) fits in LDS. This means weights can be loaded into VRAM once at init, and the hot path reads weights from VRAM through L2 cache with activations broadcast from LDS. No round-trips to shared system RAM in steady state.
+
+### Shader Design
+
+Vulkan GLSL compute shader with branchless ternary decode:
+- 2-bit weight codes: bit0 = nonzero flag, bit1 = sign flag
+- `contribution = activation * float(code & 1) * (1.0 - 2.0 * float(code >> 1))`
+- No divergent branches in the wavefront (critical for GPU efficiency)
+- Activation vector loaded into shared memory (LDS) via collaborative workgroup load
+- RADV (Mesa Vulkan) driver on Linux, no ROCm required
+
+### Benchmark Results (Proof of Concept)
+
+Single layer (M=1, K=2560, N=2560):
+
+| Method | Time | Throughput | vs CPU |
+|--------|------|-----------|--------|
+| CPU soft-chip v3 (AVX2) | 1.56 ms | 8.4 GFLOP/s | 1x |
+| GPU individual submit | 1.04 ms | 12.7 GFLOP/s | **1.5x** |
+| **GPU batched (7 dispatch)** | **0.61 ms** | **21.6 GFLOP/s** | **2.6x** |
+
+Vulkan submit overhead: ~0.43 ms per submission. Batching 7 dispatches (one decoder layer's 7 matmuls) into a single command buffer amortizes this.
+
+### Projected Full Model Impact
+
+| Metric | CPU soft-chip | GPU Vulkan (projected) | Speedup |
+|--------|--------------|----------------------|---------|
+| Full 30-layer forward (M=1) | 910 ms | ~140 ms | **~6.5x** |
+| 200-token rollout | 182 s (3 min) | ~28 s | **~6.5x** |
+
+This is with a **naive first-cut shader** (no vec4 loads, no subgroup ops, no LDS tiling). With optimization, 2-4x further improvement is expected, potentially reaching ~35-70ms per forward pass (~10-25x vs CPU).
+
+### Source
+
+- `softchip/ternary_matmul.comp` -- Vulkan GLSL compute shader
+- `softchip/ternary_matmul.spv` -- Compiled SPIR-V
+- `softchip/vk_ternary.c` -- Vulkan dispatch harness + benchmark
+
+```bash
+# Compile shader
+glslangValidator -V softchip/ternary_matmul.comp -o softchip/ternary_matmul.spv
+
+# Compile and run benchmark
+gcc -O2 -o softchip/vk_ternary softchip/vk_ternary.c -lvulkan -lm -ldl
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json ./softchip/vk_ternary
+```
+
 ## Next Steps
 
-### Phase 1: Thor Deployment (NEXT)
+### Phase 0: iGPU Shader Optimization (NEXT)
+- LMM Pass 4: analyze optimization opportunities for the Vulkan compute shader
+- vec4 loads (4 activations per load), subgroup shuffle ops, LDS tiling
+- Target: 0.2-0.3 ms/layer (3-4x improvement over naive)
+- Wire into Python/PyTorch for full model inference
+
+### Phase 1: Thor Deployment
 - Port validation code + soft-chip to Jetson AGX Thor (128GB unified memory, Blackwell GPU)
 - Verify GPU-accelerated forward/backward pass (~1-5s expected)
 - Set up bitnet.cpp for fast rollout generation (~35 tok/s on CPU, faster on GPU)
@@ -264,11 +338,17 @@ huggingface-cli download microsoft/bitnet-b1.58-2B-4T-bf16 --local-dir models/bi
 # Run TinyLoRA validation
 python test_bitnet_tinylora.py
 
-# Build and benchmark soft-chip kernel (requires AVX2)
+# Build and benchmark soft-chip CPU kernel (requires AVX2)
 gcc -O3 -mavx2 -mfma -march=native -fopenmp -shared -fPIC \
     -o softchip/ternary_matmul_v3.so softchip/ternary_matmul_v3.c -lm
 python test_softchip_accuracy.py    # Numerical validation
 python bench_softchip_model.py      # Full model benchmark
+
+# Build and benchmark soft-chip GPU kernel (requires Vulkan + AMD iGPU)
+sudo apt-get install libvulkan-dev glslang-tools mesa-vulkan-drivers
+glslangValidator -V softchip/ternary_matmul.comp -o softchip/ternary_matmul.spv
+gcc -O2 -o softchip/vk_ternary softchip/vk_ternary.c -lvulkan -lm -ldl
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json ./softchip/vk_ternary
 ```
 
 ## LMM Analysis
@@ -292,3 +372,7 @@ The pivot from LFM2-24B to BitNet b1.58 was driven by the REFLECT phase identify
 - Key finding: M=1 (autoregressive) is the critical use case; OpenMP thread overhead makes parallel worse than serial for small batch
 - Decision: smart threading (serial for M<6, parallel for M>=6) + numerical validation gate before PyTorch integration
 - Led directly to v3 kernel (4.3x M=1 improvement) and validated PyTorch integration (4.6x full-model speedup)
+
+### Pass 4: iGPU Shader Optimization (PENDING)
+- Planned: `journal/igpu_opt_raw.md` through `journal/igpu_opt_synth.md`
+- Will analyze: vec4 loads, subgroup ops, LDS tiling, memory access patterns on Vega 7
