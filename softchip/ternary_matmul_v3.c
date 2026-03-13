@@ -338,9 +338,17 @@ void ternary_matmul_backward(const uint8_t *packed_w,
     int packed_row_bytes = (in_features + 3) / 4;
 
     /*
-     * Threading strategy: same as forward.
-     * For M=1 (autoregressive backward), serial is better.
-     * For M>=6, parallelize over batch.
+     * Threading strategy for backward: same as forward.
+     *
+     * For M>=6: parallelize over batch (each sample independent).
+     * For M<6: serial. OpenMP parallelization over N (out_features) with
+     * per-thread buffers + reduction was tested (LMM Pass 6) and achieved
+     * 3.4x kernel speedup in isolation, but caused system-level contention
+     * with PyTorch/MKL threads during autograd traversal, resulting in
+     * a net regression (-9%). Serial is the production path for this CPU.
+     *
+     * On the Thor (CUDA), this kernel won't be used — native BF16 matmul
+     * will be fast enough.
      */
     if (batch >= 6) {
         #pragma omp parallel for schedule(dynamic)
