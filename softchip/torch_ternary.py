@@ -3,7 +3,11 @@ PyTorch integration for the soft-chip ternary matmul kernel.
 
 Provides a drop-in replacement for AutoBitLinear's forward pass using
 either the AVX2 CPU kernel or the Vulkan iGPU kernel. The backward pass
-is untouched (falls back to PyTorch's STE path through BF16 master weights).
+uses a ternary backward kernel (STE: grad_input = W^T @ grad_output).
+
+Also provides patch_lm_head_fp32() to fix the catastrophic BF16 GEMM
+performance on CPUs without AMX/VNNI (e.g. Ryzen) by casting the LM head
+weight to FP32 and using a custom autograd function.
 
 Backend selection:
     - "vulkan": Use Vega 7 iGPU via Vulkan compute (fastest for M=1)
@@ -11,12 +15,13 @@ Backend selection:
     - "auto": Try Vulkan first, fall back to CPU
 
 Usage:
-    from softchip.torch_ternary import patch_model, unpatch_model
+    from softchip.torch_ternary import patch_model, patch_lm_head_fp32, unpatch_model
 
     model = AutoModelForCausalLM.from_pretrained(...)
-    patch_model(model, backend="auto")  # Vulkan if available, else CPU
-    output = model(input)               # Uses soft-chip for forward
-    unpatch_model(model)                # Restore original forward
+    patch_model(model, backend="auto")    # Ternary soft-chip for AutoBitLinear
+    patch_lm_head_fp32(model)             # FP32 for LM head (17x speedup on Ryzen)
+    output = model(input)
+    unpatch_model(model)                  # Restore everything
 """
 
 import ctypes
@@ -458,7 +463,7 @@ def patch_model(model, backend="auto", verbose=True):
 
 
 def unpatch_model(model, verbose=True):
-    """Restore original AutoBitLinear forward passes."""
+    """Restore original AutoBitLinear forward passes and LM head."""
     global _vk_available
 
     count = 0
@@ -472,6 +477,9 @@ def unpatch_model(model, verbose=True):
                 delattr(module, _BACKEND_ATTR)
             count += 1
 
+    # Unpatch LM head if it was patched
+    unpatch_lm_head(model, verbose=False)
+
     # Shut down Vulkan if it was initialized
     if _vk_available and _vk_lib:
         _vk_lib.vk_shutdown()
@@ -481,3 +489,140 @@ def unpatch_model(model, verbose=True):
         print(f"Soft-chip: unpatched {count} layers")
 
     return count
+
+
+# -----------------------------------------------------------------------
+# FP32 LM Head patch — fixes catastrophic BF16 GEMM on CPUs w/o AMX/VNNI
+# -----------------------------------------------------------------------
+_LM_HEAD_PATCH_ATTR = "_softchip_lm_head_original_forward"
+_LM_HEAD_FP32_WEIGHT_ATTR = "_softchip_lm_head_fp32_weight"
+
+
+class FP32LMHeadFunction(torch.autograd.Function):
+    """
+    Custom autograd function for the LM head that does all matmuls in FP32.
+
+    On CPUs without AMX/VNNI (e.g. Ryzen 5 PRO 5675U), MKL's BF16 GEMM is
+    ~32x slower than FP32 GEMM. For the LM head (128256 x 2560), this means
+    BF16 backward takes ~9s per call vs ~90ms in FP32.
+
+    This function:
+    - Forward: casts input BF16->FP32, matmuls in FP32, casts output->BF16
+    - Backward: casts grad_output BF16->FP32, matmuls in FP32, casts grad_input->BF16
+    - Never computes grad_weight (weight is frozen)
+
+    Memory cost: +0.66 GB for FP32 copy of LM head weight (128256 x 2560).
+    """
+
+    @staticmethod
+    def forward(ctx, input_bf16, weight_f32, bias):
+        # input: [batch, seq, hidden_dim] in BF16
+        # weight: [vocab_size, hidden_dim] in FP32 (pre-converted)
+        input_f32 = input_bf16.float()
+        output_f32 = input_f32 @ weight_f32.T
+        if bias is not None:
+            output_f32 = output_f32 + bias.float()
+        ctx.save_for_backward(weight_f32)
+        ctx.has_bias = bias is not None
+        return output_f32.to(input_bf16.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (weight_f32,) = ctx.saved_tensors
+        # grad_output: [batch, seq, vocab_size] in BF16
+        # grad_input = grad_output @ weight (no transpose — weight is [vocab, hidden])
+        grad_f32 = grad_output.float()
+        grad_input_f32 = grad_f32 @ weight_f32
+        grad_input = grad_input_f32.to(grad_output.dtype)
+        # No grad for weight (frozen) or bias (frozen or None)
+        return grad_input, None, None
+
+
+def patch_lm_head_fp32(model, verbose=True):
+    """
+    Patch the model's LM head to use FP32 matmul instead of BF16.
+
+    This fixes the catastrophic BF16 GEMM performance on CPUs without
+    AMX/VNNI instructions. The LM head weight is converted to FP32 once
+    and stored alongside the original.
+
+    Must be called AFTER the model is loaded but BEFORE training.
+    Works regardless of whether patch_model() has been called.
+
+    Args:
+        model: HuggingFace causal LM model with a .lm_head attribute
+        verbose: print progress
+
+    Returns:
+        True if patched, False if lm_head not found or already patched
+    """
+    # Find the lm_head
+    lm_head = getattr(model, "lm_head", None)
+    if lm_head is None:
+        if verbose:
+            print("FP32 LM head: no lm_head found on model, skipping")
+        return False
+
+    if not isinstance(lm_head, nn.Linear):
+        if verbose:
+            print(
+                f"FP32 LM head: lm_head is {type(lm_head).__name__}, not nn.Linear, skipping"
+            )
+        return False
+
+    if hasattr(lm_head, _LM_HEAD_PATCH_ATTR):
+        if verbose:
+            print("FP32 LM head: already patched, skipping")
+        return False
+
+    # Convert weight to FP32 (keep original BF16 for weight tying)
+    weight_f32 = lm_head.weight.data.float().contiguous()
+    bias = lm_head.bias  # Usually None for LLMs
+
+    if verbose:
+        mem_mb = weight_f32.numel() * 4 / 1e6
+        print(
+            f"FP32 LM head: converting {tuple(lm_head.weight.shape)} "
+            f"from {lm_head.weight.dtype} to float32 ({mem_mb:.0f} MB)"
+        )
+
+    # Store FP32 weight as a non-parameter buffer (won't show in parameters())
+    # Use register_buffer so it moves with .to() calls but doesn't get gradients
+    lm_head.register_buffer(_LM_HEAD_FP32_WEIGHT_ATTR, weight_f32)
+
+    # Save original forward
+    setattr(lm_head, _LM_HEAD_PATCH_ATTR, lm_head.forward)
+
+    # Create patched forward
+    def make_fp32_forward(head, w_f32_attr, head_bias):
+        def patched_forward(x):
+            w_f32 = getattr(head, w_f32_attr)
+            return FP32LMHeadFunction.apply(x, w_f32, head_bias)
+
+        return patched_forward
+
+    lm_head.forward = make_fp32_forward(lm_head, _LM_HEAD_FP32_WEIGHT_ATTR, bias)
+
+    if verbose:
+        print("FP32 LM head: patched successfully")
+
+    return True
+
+
+def unpatch_lm_head(model, verbose=True):
+    """Restore the original LM head forward pass."""
+    lm_head = getattr(model, "lm_head", None)
+    if lm_head is None or not hasattr(lm_head, _LM_HEAD_PATCH_ATTR):
+        return False
+
+    lm_head.forward = getattr(lm_head, _LM_HEAD_PATCH_ATTR)
+    delattr(lm_head, _LM_HEAD_PATCH_ATTR)
+
+    # Remove FP32 weight buffer
+    if hasattr(lm_head, _LM_HEAD_FP32_WEIGHT_ATTR):
+        delattr(lm_head, _LM_HEAD_FP32_WEIGHT_ATTR)
+
+    if verbose:
+        print("FP32 LM head: unpatched")
+
+    return True

@@ -94,23 +94,26 @@ Total: 210 `AutoBitLinear` layers + embedding + LM head = 212 linear-like layers
 
 Standard LoRA adds a bypass path: `output = base(x) + BA(x)`. The bypass operates on the full-precision input `x` independently of what the base layer does internally. BitNet's `AutoBitLinear` quantizes master weights to {-1, 0, +1} during the forward pass, but the LoRA bypass path never touches those ternary weights. The gradient flows through the bypass path cleanly.
 
-### The Backward Pass: From 208s to ~48s
+### The Backward Pass: From 82.9s to 1.1s (75x Speedup)
 
-The initial backward pass through 2.41B parameters on a Ryzen 5 CPU took 208 seconds (19 tokens). This was identified as the critical bottleneck for GRPO training.
+The backward pass through 2.41B parameters on a Ryzen 5 CPU initially took 82.9 seconds (6 tokens, soft-chip forward already applied). Two key optimizations brought this to ~1 second:
 
-**Key insight:** The backward pass through frozen AutoBitLinear layers computes `grad_input = W^T @ grad_output`. Since W is ternary post-STE, this is the **same add/subtract/skip pattern** the soft-chip exploits for forward. No weight gradients are needed (frozen layers), only the gradient signal propagating backward.
+**Optimization 1: Ternary backward kernel** — The backward pass through frozen AutoBitLinear layers computes `grad_input = W^T @ grad_output`. Since W is ternary post-STE, this is the **same add/subtract/skip pattern** the soft-chip exploits for forward. A `ternary_matmul_backward` kernel was added using an **accumulate-scatter** approach: iterate over N weight rows, scatter-add each row's contribution scaled by `grad_output[n]`. This brought backward from 82.9s to 19.5s (4.3x).
 
-A `ternary_matmul_backward` kernel was added using an **accumulate-scatter** approach: iterate over N weight rows (cache-friendly sequential reads of row-major packed weights), scatter-add each row's contribution scaled by `grad_output[n]`. Uses the same AVX2 XOR+AND bit trick as the forward kernel. No activation quantization (STE passes gradients through unchanged).
+**Optimization 2: FP32 LM head (Pass 5)** — Profiling revealed 92.6% of the remaining 19.5s was spent in TWO matmul calls from the LM head (`nn.Linear(2560, 128256)`) — a dense BF16 layer that wasn't patched by the ternary kernel. Root cause: MKL's BF16 GEMM on Zen 3 (no AMX/VNNI) is 32-90x slower than FP32. A custom `FP32LMHeadFunction` casts BF16↔FP32 at boundaries and does all computation in FP32.
 
-| Metric (6 tokens) | Stock PyTorch | CPU Soft-Chip | Speedup |
-|-------------------|--------------|--------------|---------|
-| Forward | 8.8s | 1.2s | 7.2x |
-| **Backward** | **82.9s** | **19.5s** | **4.3x** |
-| **Total** | **91.7s** | **20.7s** | **4.4x** |
+| Metric (6 tokens) | Stock PyTorch | Ternary Backward | + FP32 LM Head | Total Speedup |
+|-------------------|--------------|-----------------|----------------|---------------|
+| Forward | 8.8s | 1.2s | 1.3s | **6.8x** |
+| **Backward** | **82.9s** | **19.5s** | **1.1s** | **75x** |
+| **Total** | **91.7s** | **20.7s** | **2.4s** | **38x** |
 
-Isolated backward kernel: 2.05ms per 2560×2560 M=1 (1.32x forward time). All layer shapes validated at NRMSE < 2e-6 vs PyTorch reference.
+Backward breakdown after both optimizations:
+- TernaryMatmulBackward (210 layers): 755ms (68%)
+- FP32 LM head backward: 200ms (18%)
+- Other (attention, norms, etc.): 110ms (14%)
 
-Projected for 19 tokens (original benchmark): backward ~48s (down from 208s), total forward+backward ~52s (down from ~220s). This makes CPU-only GRPO training feasible — a single gradient step takes under a minute rather than nearly 4 minutes.
+A training iteration now takes **2.4 seconds** — fast enough for interactive experimentation (25 iterations/minute).
 
 ### What Remains Unknown
 
@@ -202,24 +205,27 @@ The kernel produces essentially identical output to PyTorch's AutoBitLinear when
 The soft-chip is integrated as a drop-in replacement via monkey-patching:
 
 ```python
-from softchip.torch_ternary import patch_model, unpatch_model
+from softchip.torch_ternary import patch_model, patch_lm_head_fp32, unpatch_model
 
 model = AutoModelForCausalLM.from_pretrained(...)
-patch_model(model)       # Replaces AutoBitLinear.forward with C kernel
-output = model(input)    # 4.6x faster forward pass
-unpatch_model(model)     # Restore original
+patch_model(model)            # Replaces AutoBitLinear forward+backward with C kernel
+patch_lm_head_fp32(model)     # FP32 LM head (17x backward speedup on Ryzen)
+output = model(input)         # 6.8x faster forward, 75x faster backward
+unpatch_model(model)          # Restore original
 ```
 
-Weight packing (one-time cost at load): ~48s for 210 layers. The backward pass is unchanged -- STE requires BF16 master weights, so backward falls through to PyTorch.
+Weight packing (one-time cost at load): ~48s for 210 layers. The backward pass uses the ternary backward kernel for AutoBitLinear layers (same add/sub/skip as forward) and FP32 matmul for the LM head.
 
 ### Source
 
 - `softchip/ternary_matmul.c` -- v1 prototype (scalar decode, 221ms)
 - `softchip/ternary_matmul_v2.c` -- v2 LUT decode (LUT + AVX2, 13.2ms)
 - `softchip/ternary_matmul_v3.c` -- v3 production (smart threading, 1.6ms M=1, + backward kernel)
-- `softchip/torch_ternary.py` -- PyTorch integration (patch_model/unpatch_model, ternary forward+backward)
+- `softchip/torch_ternary.py` -- PyTorch integration (patch_model/unpatch_model, ternary forward+backward, FP32 LM head)
 - `test_softchip_accuracy.py` -- numerical validation test
 - `test_backward.py` -- backward kernel validation and benchmark
+- `test_lm_head_fp32.py` -- FP32 LM head validation and full stack benchmark
+- `profile_backward.py` -- backward pass profiling (LMM Pass 5 RAW data collection)
 - `bench_softchip_model.py` -- full model benchmark
 
 ```bash
@@ -441,17 +447,18 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json ./softchip/vk_te
 
 ## Next Steps
 
-### Phase 1: Thor Deployment (NEXT)
-- Port validation code + soft-chip to Jetson AGX Thor (128GB unified memory, Blackwell GPU)
-- Verify GPU-accelerated forward/backward pass (~1-5s expected)
-- Set up bitnet.cpp for fast rollout generation (~35 tok/s on CPU, faster on GPU)
-- The soft-chip CPU kernel may also be useful on Thor's 14-core ARM Neoverse V3AE cores
-
-### Phase 2: GRPO Training Loop
+### Phase 1: GRPO Training Loop (NEXT)
+- With 2.4s per training iteration, CPU-only GRPO training is now practical
 - Implement GRPO reward computation on GSM8K (verifiable correct/incorrect answers)
 - BitNet b1.58 baseline: 58.38% GSM8K accuracy
-- Use soft-chip for fast rollout generation, PyTorch for gradient computation
+- Use soft-chip for fast rollout generation, full optimized stack for gradient computation
 - Run first TinyLoRA + GRPO training cycle, measure improvement
+
+### Phase 2: Thor Deployment
+- Port validation code + soft-chip to Jetson AGX Thor (128GB unified memory, Blackwell GPU)
+- Verify GPU-accelerated forward/backward pass (~1-5s expected)
+- BF16 GEMM will be fast natively on Blackwell (FP32 LM head patch not needed)
+- Set up bitnet.cpp for fast rollout generation (~35 tok/s on CPU, faster on GPU)
 
 ### Phase 3: Autoresearch Loop
 - Build autonomous experiment loop (propose adapter config, train, evaluate, keep/discard)
@@ -483,6 +490,8 @@ python test_bitnet_tinylora.py
 gcc -O3 -mavx2 -mfma -march=native -fopenmp -shared -fPIC \
     -o softchip/ternary_matmul_v3.so softchip/ternary_matmul_v3.c -lm
 python test_softchip_accuracy.py    # Numerical validation
+python test_backward.py             # Backward kernel validation
+python test_lm_head_fp32.py         # FP32 LM head validation + full stack benchmark
 python bench_softchip_model.py      # Full model benchmark
 
 # Build and benchmark soft-chip GPU kernel (requires Vulkan + AMD iGPU)
@@ -495,7 +504,7 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json python test_vk_m
 
 ## LMM Analysis
 
-The Lincoln Manifold Method was used to analyze this problem through two complete passes:
+The Lincoln Manifold Method was used to analyze this problem through five complete passes:
 
 ### Pass 1: LFM2-24B-A2B + TinyLoRA on Jetson AGX Thor
 - `journal/lfm2_tinylora_raw.md` through `journal/lfm2_tinylora_synth.md`
@@ -524,3 +533,13 @@ The pivot from LFM2-24B to BitNet b1.58 was driven by the REFLECT phase identify
 - **Projection vs reality:** The ~157ms projection assumed raw shader times. Actual end-to-end Vulkan forward was 2654ms (210 dispatches × ~1ms submit overhead each). CPU soft-chip (1328ms) is faster than Vulkan for this hardware due to zero-overhead function calls vs GPU submit/fence cycles.
 - Key lesson #1: on this GPU, instruction-level parallelism and L2 sequential prefetch matter more than cross-thread memory coalescing for our access pattern
 - Key lesson #2: Vulkan submit/fence overhead (~1ms/dispatch on RADV/Vega) makes iGPU compute uncompetitive for many small dispatches. The optimization applies when ported to CUDA where submit overhead is ~10μs.
+
+### Pass 5: Backward Pass Optimization — FP32 LM Head
+- `journal/backward_opt_raw.md` through `journal/backward_opt_synth.md`
+- Profiling revealed the remaining 19.5s backward was 92.6% from TWO matmul calls in the LM head — an `nn.Linear(2560, 128256)` that was NOT patched by the ternary backward kernel because it's NOT ternary (standard dense BF16)
+- Root cause: MKL's BF16 GEMM on Zen 3 (no AMX/VNNI) is **32-90x slower** than FP32 for the same matmul
+- Fix: `FP32LMHeadFunction` — custom autograd function that casts BF16↔FP32 at boundaries, does all computation in FP32
+- The LM head is weight-tied with the embedding layer; gradients MUST flow through it to reach TinyLoRA adapters in the decoder
+- Result: backward 19,500ms → **1,065ms** (**18.3x speedup**), total iteration 20,700ms → **2,410ms** (**8.6x speedup**)
+- Memory cost: +657 MB for FP32 copy (trivial with 64 GB RAM)
+- Cumulative speedup from stock PyTorch: **38x** (91,700ms → 2,410ms)

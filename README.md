@@ -1,3 +1,18 @@
+# TinyMoE-Search: TinyLoRA + RL on BitNet b1.58
+
+> **Fork status:** This fork has diverged from the upstream [karpathy/autoresearch](https://github.com/karpathy/autoresearch). It repurposes the autoresearch concept for a different goal: discovering minimal parameter interventions on frozen ternary LLMs using sub-rank-1 LoRA adapters trained with reinforcement learning (GRPO).
+
+**Target model:** Microsoft BitNet b1.58 2B4T (natively ternary {-1,0,+1} weights)
+**Key result:** 4 scalar parameters measurably steer a 2.41B-parameter ternary model. Custom ternary kernels achieve a **38x training iteration speedup** over stock PyTorch on CPU.
+
+See **[FINDINGS.md](FINDINGS.md)** for the full technical writeup and **[journal/](journal/)** for LMM analysis passes.
+
+---
+
+*Original upstream README follows below.*
+
+---
+
 # autoresearch
 
 ![teaser](progress.png)

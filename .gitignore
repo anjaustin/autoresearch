@@ -24,3 +24,7 @@ results.tsv
 
 # Model weights (large binary files)
 models/
+
+# Compiled shared libraries and SPIR-V shaders
+*.so
+*.spv
