@@ -315,28 +315,96 @@ Per decoder layer kernel time: q(0.30) + k(0.12) + v(0.12) + o(0.30) + gate(0.88
 | **200-token rollout** | **182 s (3 min)** | **~36 s** | **~31 s** |
 | vs stock PyTorch (4200 ms) | 4.6x | ~23x | **~27x** |
 
+### Vulkan Backend Library and PyTorch Integration
+
+The optimized Vulkan shader was wrapped in a shared library (`vk_backend.c`) exposing a clean C API, then integrated into the PyTorch `patch_model()` system as a new `backend="vulkan"` option.
+
+#### C Backend API
+
+```c
+int  vk_init(const char *spv_path);           // Initialize Vulkan + load shader
+int  vk_alloc_layer(uint32_t *packed, int N, int K, float scale);  // Upload packed weights
+int  vk_dispatch(int layer_id, float *act, float *out);            // Single dispatch
+int  vk_dispatch_batch(int *ids, int n, float *act, float **outs); // Batched dispatch
+void vk_shutdown(void);                        // Cleanup
+```
+
+Key design: `vk_dispatch_batch()` records multiple dispatches into a single command buffer, eliminating per-dispatch submit overhead. Tested with q+k+v (3 dispatches): **1.49x speedup** over 3 individual submits.
+
+#### Backend Validation (`test_vk_backend.py`)
+
+| Layer Shape | CPU vs VK NRMSE | VK vs VK | Vulkan Dispatch (ms) |
+|-------------|----------------|----------|---------------------|
+| q_proj/o_proj (2560×2560) | 4.11e-03 | bit-exact | 0.677 |
+| k_proj/v_proj (640×2560) | 4.03e-03 | bit-exact | 0.433 |
+| gate_proj/up_proj (6912×2560) | 3.89e-03 | bit-exact | 0.888 |
+| down_proj (2560×6912) | 3.91e-03 | bit-exact | 1.400 |
+
+The ~4e-3 NRMSE between CPU and Vulkan is expected: the CPU kernel applies INT8 activation quantization (`ActQuant`) while the Vulkan shader operates on raw FP32 activations. Both paths are numerically valid — the GPU matches its own output exactly (bit-exact determinism).
+
+Batch dispatch benchmark:
+- **3 dispatches in 1 submit:** 1.084 ms (0.361 ms/dispatch)
+- **3 individual submits:** 1.613 ms (0.538 ms/dispatch)
+- **Batch speedup: 1.49x**
+
+#### End-to-End Model Validation (`test_vk_model.py`)
+
+Full BitNet b1.58 2B4T model loaded and run through all three backends on the same 6-token prompt ("The capital of France is"):
+
+| Backend | Forward Time | Top-1 Prediction |
+|---------|-------------|-----------------|
+| Stock PyTorch | 8443 ms | " Paris" |
+| CPU soft-chip | 1762 ms | " Paris" |
+| Vulkan soft-chip | 1801 ms | " Paris" |
+
+All backends produce identical top-5 predictions: [" Paris", " not", " a", " the", " called"].
+
+| Comparison | NRMSE |
+|-----------|-------|
+| CPU vs stock PyTorch | 2.97e-02 |
+| Vulkan vs stock PyTorch | 5.11e-02 |
+| Vulkan vs CPU | 3.09e-02 |
+| **Vulkan vs Vulkan** | **0.00e+00 (bit-exact)** |
+
+Full-model NRMSE is higher than per-layer (~4e-3) because quantization differences accumulate through 30 decoder layers (210 matmuls). The key result: all backends agree on functional output (same top-k predictions) and Vulkan is perfectly deterministic.
+
+**Note on forward time:** Vulkan (1801 ms) is similar to CPU (1762 ms) rather than the projected ~157 ms because the current Python `ctypes` integration adds per-dispatch overhead through 210 individual calls. The raw shader benchmarks (0.30 ms for 2560×2560) are 5.8x faster than CPU; the gap is in Python dispatch overhead, not shader performance. Batching all 7 matmuls per decoder layer into single command buffers would close this gap.
+
 ### Source
 
 - `softchip/ternary_matmul.comp` -- v2 Vulkan GLSL shader (proof-of-concept, kept for reference)
 - `softchip/ternary_matmul_v3.comp` -- v3 optimized shader (production)
 - `softchip/vk_ternary.c` -- v2 dispatch harness + benchmark
 - `softchip/vk_ternary_v3.c` -- v3 dispatch harness + multi-shape benchmark
+- `softchip/vk_backend.c` -- Vulkan backend shared library (init/alloc/dispatch/batch/shutdown)
+- `softchip/torch_ternary.py` -- PyTorch integration (now supports `backend="vulkan"|"cpu"|"auto"`)
+- `softchip/test_vk_backend.py` -- Vulkan backend validation test (per-layer + batch)
+- `test_vk_model.py` -- End-to-end model validation (all 3 backends)
 
 ```bash
 # Compile v3 shader
 glslangValidator -V softchip/ternary_matmul_v3.comp -o softchip/ternary_matmul_v3.spv
 
-# Compile and run v3 benchmark
+# Compile Vulkan backend library
+gcc -O2 -shared -fPIC -o softchip/libvk_ternary.so softchip/vk_backend.c -lvulkan -lm -ldl
+
+# Run per-layer Vulkan validation
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json python softchip/test_vk_backend.py
+
+# Run end-to-end model validation (requires model in models/)
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json python test_vk_model.py
+
+# Compile and run standalone v3 benchmark
 gcc -O2 -o softchip/vk_ternary_v3 softchip/vk_ternary_v3.c -lvulkan -lm -ldl
 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json ./softchip/vk_ternary_v3
 ```
 
 ## Next Steps
 
-### Phase 0: iGPU Integration (NEXT)
-- Wire optimized Vulkan path into Python/PyTorch (`patch_model` with GPU backend)
-- Batch independent matmuls (q+k+v, gate+up) into single command buffer submissions
-- End-to-end benchmark: full model forward through Vulkan, compare output logits to CPU path
+### Phase 0: iGPU Integration Optimization (NEXT)
+- Batch all 7 matmuls per decoder layer into single command buffer submissions (reduce Python dispatch overhead)
+- Implement pre-allocated output buffers on GPU side to eliminate host-device copies per dispatch
+- Full model forward benchmark with optimized batching to validate ~157ms projection
 - 200-token rollout benchmark to confirm ~31s target
 
 ### Phase 1: Thor Deployment
@@ -386,8 +454,9 @@ python bench_softchip_model.py      # Full model benchmark
 # Build and benchmark soft-chip GPU kernel (requires Vulkan + AMD iGPU)
 sudo apt-get install libvulkan-dev glslang-tools mesa-vulkan-drivers
 glslangValidator -V softchip/ternary_matmul_v3.comp -o softchip/ternary_matmul_v3.spv
-gcc -O2 -o softchip/vk_ternary_v3 softchip/vk_ternary_v3.c -lvulkan -lm -ldl
-VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json ./softchip/vk_ternary_v3
+gcc -O2 -shared -fPIC -o softchip/libvk_ternary.so softchip/vk_backend.c -lvulkan -lm -ldl
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json python softchip/test_vk_backend.py
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json python test_vk_model.py
 ```
 
 ## LMM Analysis

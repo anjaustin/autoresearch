@@ -2,16 +2,21 @@
 PyTorch integration for the soft-chip ternary matmul kernel.
 
 Provides a drop-in replacement for AutoBitLinear's forward pass using
-our AVX2 kernel. The backward pass is untouched (falls back to PyTorch's
-STE path through the BF16 master weights).
+either the AVX2 CPU kernel or the Vulkan iGPU kernel. The backward pass
+is untouched (falls back to PyTorch's STE path through BF16 master weights).
+
+Backend selection:
+    - "vulkan": Use Vega 7 iGPU via Vulkan compute (fastest for M=1)
+    - "cpu": Use AVX2 kernel (fallback)
+    - "auto": Try Vulkan first, fall back to CPU
 
 Usage:
     from softchip.torch_ternary import patch_model, unpatch_model
 
     model = AutoModelForCausalLM.from_pretrained(...)
-    patch_model(model)       # Replace AutoBitLinear forward with soft-chip
-    output = model(input)    # Uses soft-chip for forward, PyTorch for backward
-    unpatch_model(model)     # Restore original forward
+    patch_model(model, backend="auto")  # Vulkan if available, else CPU
+    output = model(input)               # Uses soft-chip for forward
+    unpatch_model(model)                # Restore original forward
 """
 
 import ctypes
@@ -24,7 +29,7 @@ import torch
 import torch.nn as nn
 
 # -----------------------------------------------------------------------
-# Load the C shared library
+# Load the CPU C shared library
 # -----------------------------------------------------------------------
 _LIB_DIR = Path(__file__).parent
 _LIB_PATH = _LIB_DIR / "ternary_matmul_v3.so"
@@ -69,6 +74,89 @@ def _ensure_lib():
 
 
 # -----------------------------------------------------------------------
+# Load the Vulkan shared library
+# -----------------------------------------------------------------------
+_VK_LIB_PATH = _LIB_DIR / "libvk_ternary.so"
+_SPV_PATH = _LIB_DIR / "ternary_matmul_v3.spv"
+
+_vk_lib = None
+_vk_available = None  # None = not checked yet, True/False after check
+
+
+def _try_load_vulkan():
+    """Try to load and initialize the Vulkan backend. Returns True on success."""
+    global _vk_lib, _vk_available
+
+    if _vk_available is not None:
+        return _vk_available
+
+    if not _VK_LIB_PATH.exists():
+        _vk_available = False
+        return False
+
+    if not _SPV_PATH.exists():
+        _vk_available = False
+        return False
+
+    try:
+        _vk_lib = ctypes.CDLL(str(_VK_LIB_PATH))
+
+        # Set up function signatures
+        _vk_lib.vk_init.restype = ctypes.c_int
+        _vk_lib.vk_init.argtypes = [ctypes.c_char_p]
+
+        _vk_lib.vk_device_name.restype = ctypes.c_char_p
+        _vk_lib.vk_device_name.argtypes = []
+
+        _vk_lib.vk_alloc_layer.restype = ctypes.c_int
+        _vk_lib.vk_alloc_layer.argtypes = [
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_float,
+        ]
+
+        _vk_lib.vk_dispatch.restype = ctypes.c_int
+        _vk_lib.vk_dispatch.argtypes = [
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+        ]
+
+        _vk_lib.vk_dispatch_batch.restype = ctypes.c_int
+        _vk_lib.vk_dispatch_batch.argtypes = [
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_float)),
+        ]
+
+        _vk_lib.vk_shutdown.restype = None
+        _vk_lib.vk_shutdown.argtypes = []
+
+        # Initialize Vulkan
+        rc = _vk_lib.vk_init(str(_SPV_PATH).encode())
+        if rc != 0:
+            _vk_available = False
+            return False
+
+        _vk_available = True
+        return True
+
+    except (OSError, AttributeError) as e:
+        _vk_available = False
+        return False
+
+
+def _vk_device_name():
+    """Return the Vulkan GPU device name, or None."""
+    if _vk_lib and _vk_available:
+        name = _vk_lib.vk_device_name()
+        return name.decode() if name else None
+    return None
+
+
+# -----------------------------------------------------------------------
 # Packed weight cache
 # -----------------------------------------------------------------------
 class PackedWeight:
@@ -80,15 +168,17 @@ class PackedWeight:
         "out_features",
         "in_features",
         "packed_row_bytes",
+        "vk_layer_id",
     )
 
-    def __init__(self, weight_tensor):
+    def __init__(self, weight_tensor, upload_vulkan=False):
         """Pack a BF16/FP32 weight tensor using the C kernel's pack_weights."""
         lib = _ensure_lib()
 
         w_f32 = weight_tensor.float().contiguous()
         self.out_features, self.in_features = w_f32.shape
         self.packed_row_bytes = (self.in_features + 3) // 4
+        self.vk_layer_id = -1
 
         w_np = w_f32.numpy()
         w_ptr = w_np.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
@@ -97,6 +187,22 @@ class PackedWeight:
             w_ptr, self.out_features, self.in_features, ctypes.byref(scale)
         )
         self.weight_scale = scale.value
+
+        # Upload to Vulkan GPU if requested
+        if upload_vulkan and _vk_available and _vk_lib:
+            packed_row_uints = (self.in_features + 15) // 16
+            total_uints = self.out_features * packed_row_uints
+            # The CPU pack_weights returns uint8 pointer (4 weights per byte)
+            # Vulkan needs uint32 pointer (16 weights per uint32) — same data
+            packed_u32_ptr = ctypes.cast(
+                self.packed_ptr, ctypes.POINTER(ctypes.c_uint32)
+            )
+            self.vk_layer_id = _vk_lib.vk_alloc_layer(
+                packed_u32_ptr,
+                self.out_features,
+                self.in_features,
+                self.weight_scale,
+            )
 
     def __del__(self):
         """Free the C-allocated packed weights."""
@@ -109,42 +215,29 @@ class PackedWeight:
 
 
 # -----------------------------------------------------------------------
-# Custom autograd function
+# Custom autograd functions
 # -----------------------------------------------------------------------
 class TernaryMatmulFunction(torch.autograd.Function):
     """
-    Forward: use soft-chip C kernel (fast, ternary-optimized)
+    Forward: use soft-chip C kernel (CPU, fast, ternary-optimized)
     Backward: fall back to PyTorch (STE through BF16 master weights)
-
-    The forward replaces the quantized matmul that AutoBitLinear does.
-    The backward must go through the original layer to get correct STE gradients.
     """
 
     @staticmethod
     def forward(ctx, input_tensor, packed_weight, original_layer):
-        """
-        Args:
-            input_tensor: (*, in_features) activation tensor
-            packed_weight: PackedWeight instance
-            original_layer: the original AutoBitLinear module (for backward)
-        """
         lib = _ensure_lib()
         pw = packed_weight
 
-        # Flatten input to 2D: (batch, in_features)
         orig_shape = input_tensor.shape
         x_2d = input_tensor.reshape(-1, pw.in_features)
         batch = x_2d.shape[0]
 
-        # Convert to FP32 numpy for C kernel
         x_f32 = x_2d.float().contiguous().numpy()
         x_ptr = x_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
 
-        # Allocate output
         out_f32 = np.empty((batch, pw.out_features), dtype=np.float32)
         out_ptr = out_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
 
-        # Run kernel
         lib.ternary_matmul(
             pw.packed_ptr,
             x_ptr,
@@ -155,30 +248,67 @@ class TernaryMatmulFunction(torch.autograd.Function):
             pw.weight_scale,
         )
 
-        # Convert back to tensor, matching input dtype
         output = torch.from_numpy(out_f32).to(
             device=input_tensor.device, dtype=input_tensor.dtype
         )
         output = output.reshape(*orig_shape[:-1], pw.out_features)
 
-        # Save for backward
         ctx.save_for_backward(input_tensor)
         ctx.original_layer = original_layer
-
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        """
-        Fall back to PyTorch for backward (STE requires BF16 master weights).
-
-        We recompute the forward through the original layer to build the
-        autograd graph, then backprop through that.
-        """
         (input_tensor,) = ctx.saved_tensors
         original_layer = ctx.original_layer
 
-        # Recompute forward through original layer (builds autograd graph)
+        with torch.enable_grad():
+            input_detached = input_tensor.detach().requires_grad_(True)
+            output = original_layer(input_detached)
+            output.backward(grad_output)
+
+        return input_detached.grad, None, None
+
+
+class VulkanMatmulFunction(torch.autograd.Function):
+    """
+    Forward: use Vulkan iGPU compute shader (fastest for M=1)
+    Backward: fall back to PyTorch (STE through BF16 master weights)
+    """
+
+    @staticmethod
+    def forward(ctx, input_tensor, packed_weight, original_layer):
+        pw = packed_weight
+
+        orig_shape = input_tensor.shape
+        x_2d = input_tensor.reshape(-1, pw.in_features)
+        batch = x_2d.shape[0]
+
+        # Vulkan dispatch is M=1 only; loop for batch > 1
+        x_f32 = x_2d.float().contiguous().numpy()
+        out_f32 = np.empty((batch, pw.out_features), dtype=np.float32)
+
+        for m in range(batch):
+            act_ptr = x_f32[m : m + 1].ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            out_ptr = out_f32[m : m + 1].ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            rc = _vk_lib.vk_dispatch(pw.vk_layer_id, act_ptr, out_ptr)
+            if rc != 0:
+                raise RuntimeError(f"Vulkan dispatch failed for layer {pw.vk_layer_id}")
+
+        output = torch.from_numpy(out_f32).to(
+            device=input_tensor.device, dtype=input_tensor.dtype
+        )
+        output = output.reshape(*orig_shape[:-1], pw.out_features)
+
+        ctx.save_for_backward(input_tensor)
+        ctx.original_layer = original_layer
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (input_tensor,) = ctx.saved_tensors
+        original_layer = ctx.original_layer
+
         with torch.enable_grad():
             input_detached = input_tensor.detach().requires_grad_(True)
             output = original_layer(input_detached)
@@ -192,14 +322,16 @@ class TernaryMatmulFunction(torch.autograd.Function):
 # -----------------------------------------------------------------------
 _PATCH_ATTR = "_softchip_original_forward"
 _PACKED_ATTR = "_softchip_packed_weight"
+_BACKEND_ATTR = "_softchip_backend"
 
 
-def patch_model(model, verbose=True):
+def patch_model(model, backend="auto", verbose=True):
     """
     Replace all AutoBitLinear forward passes with soft-chip kernel.
 
     Args:
         model: a HuggingFace model with AutoBitLinear layers
+        backend: "vulkan", "cpu", or "auto" (try vulkan, fall back to cpu)
         verbose: print progress
 
     Returns:
@@ -207,7 +339,31 @@ def patch_model(model, verbose=True):
     """
     _ensure_lib()
 
+    # Determine backend
+    use_vulkan = False
+    if backend == "vulkan":
+        if not _try_load_vulkan():
+            raise RuntimeError(
+                "Vulkan backend requested but not available. "
+                "Build with: gcc -O2 -shared -fPIC -o softchip/libvk_ternary.so "
+                "softchip/vk_backend.c -lvulkan -lm -ldl"
+            )
+        use_vulkan = True
+    elif backend == "auto":
+        use_vulkan = _try_load_vulkan()
+    elif backend != "cpu":
+        raise ValueError(
+            f"Unknown backend: {backend!r}. Use 'vulkan', 'cpu', or 'auto'"
+        )
+
+    if verbose and use_vulkan:
+        dev = _vk_device_name() or "unknown"
+        print(f"Soft-chip: using Vulkan backend ({dev})")
+    elif verbose:
+        print("Soft-chip: using CPU (AVX2) backend")
+
     count = 0
+    vk_count = 0
     total_pack_time = 0.0
 
     for name, module in model.named_modules():
@@ -215,37 +371,42 @@ def patch_model(model, verbose=True):
         if class_name != "AutoBitLinear":
             continue
 
-        # Pack weights
+        # Pack weights (and upload to GPU if using Vulkan)
         t0 = time.time()
-        packed = PackedWeight(module.weight.data)
+        packed = PackedWeight(module.weight.data, upload_vulkan=use_vulkan)
         pack_time = time.time() - t0
         total_pack_time += pack_time
 
-        # Store packed weight and original forward on the module
+        # Determine per-layer backend
+        layer_use_vulkan = use_vulkan and packed.vk_layer_id >= 0
+
+        # Store packed weight, original forward, and backend on the module
         setattr(module, _PACKED_ATTR, packed)
         setattr(module, _PATCH_ATTR, module.forward)
+        setattr(module, _BACKEND_ATTR, "vulkan" if layer_use_vulkan else "cpu")
 
         # Create patched forward
-        def make_forward(mod, pw):
-            original_forward = getattr(mod, _PATCH_ATTR)
-
+        def make_forward(mod, pw, is_vulkan):
             def patched_forward(x):
-                if x.requires_grad:
-                    # Training mode: use custom autograd function
-                    return TernaryMatmulFunction.apply(x, pw, mod)
+                if is_vulkan:
+                    return VulkanMatmulFunction.apply(x, pw, mod)
                 else:
-                    # Inference mode: just use the C kernel directly
                     return TernaryMatmulFunction.apply(x, pw, mod)
 
             return patched_forward
 
-        module.forward = make_forward(module, packed)
+        module.forward = make_forward(module, packed, layer_use_vulkan)
         count += 1
+        if layer_use_vulkan:
+            vk_count += 1
 
     if verbose:
+        backend_str = (
+            f"{vk_count} Vulkan + {count - vk_count} CPU" if vk_count else "CPU"
+        )
         print(
             f"Soft-chip: patched {count} AutoBitLinear layers "
-            f"(weight packing: {total_pack_time:.1f}s)"
+            f"[{backend_str}] (weight packing: {total_pack_time:.1f}s)"
         )
 
     return count
@@ -253,6 +414,8 @@ def patch_model(model, verbose=True):
 
 def unpatch_model(model, verbose=True):
     """Restore original AutoBitLinear forward passes."""
+    global _vk_available
+
     count = 0
     for name, module in model.named_modules():
         if hasattr(module, _PATCH_ATTR):
@@ -260,7 +423,14 @@ def unpatch_model(model, verbose=True):
             delattr(module, _PATCH_ATTR)
             if hasattr(module, _PACKED_ATTR):
                 delattr(module, _PACKED_ATTR)
+            if hasattr(module, _BACKEND_ATTR):
+                delattr(module, _BACKEND_ATTR)
             count += 1
+
+    # Shut down Vulkan if it was initialized
+    if _vk_available and _vk_lib:
+        _vk_lib.vk_shutdown()
+        _vk_available = None
 
     if verbose:
         print(f"Soft-chip: unpatched {count} layers")
