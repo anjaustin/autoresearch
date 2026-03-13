@@ -156,3 +156,52 @@ The most important lesson from this LMM pass: GPU optimization is about **memory
 5. **End-to-end validation**: full model forward pass through Vulkan, compare output logits to CPU soft-chip and stock PyTorch
 6. **200-token rollout benchmark** → confirm 10-13 second target
 7. **Begin GRPO training loop design** (separate LMM pass)
+
+---
+
+## Post-Implementation Results (Steps 1-4 Complete)
+
+### What Actually Happened
+
+A/B testing of 4 shader variants **overturned the REFLECT phase's core prediction**:
+
+| Variant | Layout | Optimizations | 2560×2560 batched | vs v2 |
+|---------|--------|--------------|-------------------|-------|
+| v2 (baseline) | row-major | branchless float | 0.80 ms | 1.0x |
+| v3-transposed+vec4 | transposed | bit trick + vec4 | 0.49 ms | 1.6x |
+| v3-transposed-scalar | transposed | bit trick only | 0.96 ms | 0.8x |
+| **v3 (winner)** | **row-major** | **bit trick + full unroll** | **0.30 ms** | **2.0x** |
+
+### Where the Analysis Was Wrong
+
+The REFLECT phase identified uncoalesced weight reads as the #1 bottleneck and predicted transposed layout would give 3-6x improvement. In reality:
+
+1. **Transposed layout without vec4 was SLOWER than v2.** The strided sequential reads (each thread jumps `num_groups * 4 = 640 bytes` between loop iterations) destroyed L2 prefetch locality. Cross-thread coalescing did not compensate.
+
+2. **Transposed layout with vec4 was only 1.6x.** The vec4 amortized the stride cost (4 useful reads per strided jump), but the net effect was modest.
+
+3. **Row-major + bit trick + full unrolling was 2.0x.** Keeping v2's memory layout preserved sequential L2 prefetch. The performance came from:
+   - **XOR+AND bit trick**: Eliminated float multiply (2+ cycles) → integer bitwise (1 cycle each)
+   - **Full unrolling**: Eliminated the inner loop entirely (no branch, increment, compare for 16 iterations). 4 independent accumulators enable out-of-order execution overlap.
+   - **LDS right-sizing**: Specialization constants (2560 vs 6912) push occupancy from 20% to 60% for smaller layers.
+
+### Revised Understanding
+
+The GPU IS memory-bound (that part was correct), but the fix is NOT memory coalescing. On a 7-CU Vega APU with shared DDR4:
+- L2 cache (~1 MB) can hold most of a 2560×2560 weight matrix (1.6 MB packed)
+- Sequential L2 prefetch (row-major access) keeps the L2 warm
+- Cross-thread coalescing matters less because the L2 hit rate is already high
+- The real win is reducing the instruction count per weight, which hides memory latency better (fewer instructions → more time for memory subsystem to serve the next cache line)
+
+### Actual Results vs Targets
+
+| Metric | Target | Actual | Status |
+|---|---|---|---|
+| Per-layer kernel time (2560×2560) | 0.15-0.25 ms | **0.30 ms** | CLOSE (within 1.2x) |
+| Full model forward (M=1) | 45-65 ms | **~157 ms (projected)** | MISS (2.4x off) |
+| vs CPU soft-chip M=1 | 14-20x | **5.8x** | MISS (limited by large layers) |
+| vs stock PyTorch M=1 | 65-93x | **~27x** | MISS (but still very good) |
+| 200-token rollout | 10-13 s | **~31 s** | MISS (2.4x off) |
+| Hard gate (2x over v2) | < 0.30 ms | **0.30 ms** | **PASS** (borderline) |
+
+The 2560×2560 result (0.30 ms) is close to the per-layer target. The full-model miss is due to the large layers (gate_proj, up_proj at 0.88 ms; down_proj at 1.44 ms) being further from their targets. These layers are more heavily memory-bound (larger working sets, worse L2 fit).

@@ -269,6 +269,19 @@ LMM Pass 4 analysis identified the GPU as **memory-bound** (1.3% of peak FP32). 
 
 The winning shader (v3) keeps v2's **row-major weight layout** but uses the bit trick, full unrolling, and LDS sizing. The key insight: on this GPU, reducing instruction count and improving instruction-level parallelism matters more than memory coalescing.
 
+#### A/B Testing Methodology
+
+All 4 variants were tested on the same hardware, same data, same Vulkan session. Each variant was benchmarked with both individual submits (includes Vulkan overhead) and batched submits (7 dispatches per command buffer, amortizes overhead). Outputs were cross-validated element-by-element against v2 (NRMSE < 1e-6 for all variants).
+
+| Variant | Layout | Optimizations | Batched (ms) | vs v2 |
+|---------|--------|--------------|-------------|-------|
+| v2 (baseline) | row-major | branchless float mul | 0.80 | 1.0x |
+| transposed+vec4 | transposed | bit trick + vec4 (4 per iter) | 0.49 | 1.6x |
+| transposed+scalar | transposed | bit trick only | 0.96 | 0.8x |
+| **v3 (winner)** | **row-major** | **bit trick + full unroll (16 per uint)** | **0.30** | **2.0x** |
+
+The transposed layout's failure was instructive: it improved cross-thread coalescing but introduced a stride of `num_groups × 4 = 640 bytes` between sequential reads within each thread. On a 7-CU Vega with ~1 MB L2 cache, the L2 prefetcher's sequential access pattern (row-major) was more valuable than cross-thread coalescing. This contradicted the LMM REFLECT prediction but was confirmed by repeatable A/B results.
+
 ### Benchmark Results
 
 #### v2 (proof-of-concept, 2560×2560 only)
