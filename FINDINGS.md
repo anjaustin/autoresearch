@@ -294,11 +294,13 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json ./softchip/vk_te
 
 ## Next Steps
 
-### Phase 0: iGPU Shader Optimization (NEXT)
-- LMM Pass 4: analyze optimization opportunities for the Vulkan compute shader
-- vec4 loads (4 activations per load), subgroup shuffle ops, LDS tiling
-- Target: 0.2-0.3 ms/layer (3-4x improvement over naive)
-- Wire into Python/PyTorch for full model inference
+### Phase 0: iGPU Shader Optimization (NEXT — LMM analysis complete, implementation pending)
+- Implement transposed weight packing in Vulkan harness
+- Rewrite shader v3: transposed layout + XOR+AND bit trick + vec4 processing
+- Add specialization constants for LDS right-sizing (2560 vs 6912 variants)
+- Batch q+k+v and gate+up dispatches into single command buffer submissions
+- Wire optimized Vulkan path into Python/PyTorch (`patch_model` with GPU backend)
+- Target: 0.15-0.25 ms/layer, 45-65ms full model, 10-13s for 200-token rollout
 
 ### Phase 1: Thor Deployment
 - Port validation code + soft-chip to Jetson AGX Thor (128GB unified memory, Blackwell GPU)
@@ -373,6 +375,11 @@ The pivot from LFM2-24B to BitNet b1.58 was driven by the REFLECT phase identify
 - Decision: smart threading (serial for M<6, parallel for M>=6) + numerical validation gate before PyTorch integration
 - Led directly to v3 kernel (4.3x M=1 improvement) and validated PyTorch integration (4.6x full-model speedup)
 
-### Pass 4: iGPU Shader Optimization (PENDING)
-- Planned: `journal/igpu_opt_raw.md` through `journal/igpu_opt_synth.md`
-- Will analyze: vec4 loads, subgroup ops, LDS tiling, memory access patterns on Vega 7
+### Pass 4: iGPU Shader Optimization
+- `journal/igpu_opt_raw.md` through `journal/igpu_opt_synth.md`
+- Key finding: GPU is **memory-bound** (1.3% of peak), opposite of CPU (compute-bound at 9% of peak)
+- Primary bottleneck: uncoalesced weight reads — consecutive wavefront threads access different rows at stride=640 bytes, causing 64 cache lines per wavefront read instead of 1
+- #1 optimization: **transposed weight layout** — makes consecutive threads access consecutive memory (coalesced reads), potentially 3-6x improvement
+- Secondary: LDS right-sizing (20% → 60% occupancy), XOR+AND bit trick, vec4 processing
+- Target: 0.15-0.25 ms/layer → full model ~45-65ms → 200-token rollout ~10-13 seconds
+- Decision: implement all four optimizations as single v3 shader rewrite; skip FP16 Rapid Packed Math (uncertain RADV support) and cooperative dot product (transposed layout solves coalescing without threading model rewrite)
