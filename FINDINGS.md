@@ -139,48 +139,103 @@ No multiply instruction in the hot path. 51% of elements are zero -- free.
 
 ### Benchmark Results
 
-Single layer forward pass (M=19, K=2560, N=2560):
+#### Isolated Layer (M=19, K=2560, N=2560)
 
 | Implementation | Time | Throughput | Speedup vs PyTorch |
 |---|---|---|---|
 | PyTorch BF16 (BitNet forward) | 53.5 ms | 4.7 GFLOP/s eq | 1x (baseline) |
 | Soft-chip v1 (scalar decode) | 221.1 ms | 1.1 GFLOP/s eq | 0.24x |
-| **Soft-chip v2 (LUT + AVX2)** | **13.2 ms** | **18.9 GFLOP/s eq** | **4.1x** |
+| Soft-chip v2 (LUT + AVX2) | 13.2 ms | 18.9 GFLOP/s eq | 4.1x |
+| **Soft-chip v3 (+ smart threading)** | **13.3 ms** | **18.8 GFLOP/s eq** | **4.0x** |
 
-v1 to v2 improvement: **16.8x** (eliminating scalar unpacking from the hot path).
+v3 matches v2 for batched workloads, but adds intelligent threading:
 
-### Projected Full Model Impact
+| Batch Size | v2 Time | v3 Time | Notes |
+|---|---|---|---|
+| M=1 (autoregressive) | 6.9 ms | **1.6 ms** | v3 uses serial path (avoids thread overhead) |
+| M=19 (batched) | 12.7 ms | 13.3 ms | Both use batch-parallel OpenMP |
 
-| Metric | PyTorch | Soft-chip v2 (projected) |
-|---|---|---|
-| Full 30-layer forward pass | ~12s | ~3s |
-| GRPO rollout (200 tokens) | ~200-600s | ~50-150s |
-| Overnight experiments (8h) | ~3-5 experiments | ~12-20 experiments |
+**Key v3 insight:** For small batch sizes (M<6), OpenMP fork/join overhead (~50us/thread x 12 threads) dominates the 1.6ms single-core compute time. Running serial keeps the packed weights in one core's L3 slice, giving 4.3x improvement over the threaded path for M=1.
 
-The soft-chip accelerates inference (rollout generation) by ~4x. The backward pass still uses PyTorch (STE requires BF16 matmul against master weights, not ternary), so training speed improves less. But for the autoresearch loop, rollout generation is the bottleneck.
+#### Full Model Forward Pass (30 layers, all 210 AutoBitLinear)
+
+| Metric | PyTorch | Soft-chip v3 | Speedup |
+|---|---|---|---|
+| Forward M=15 (15-token prompt) | 8.9s | 4.6s | **2.0x** |
+| Forward M=1 (autoregressive) | 4.2s | **0.91s** | **4.6x** |
+| 200-token rollout (M=1 x 200) | ~840s (14 min) | ~182s (3 min) | **4.6x** |
+| Output cosine similarity | - | 0.9997 | - |
+
+The full-model speedup is lower than the isolated kernel speedup because the model includes non-linear layers (RMSNorm, RoPE, attention softmax, SiLU, etc.) and Python/PyTorch overhead that we don't accelerate. The 4.6x M=1 speedup is critical -- it means autoregressive rollout generation (the RL loop bottleneck) is 4.6x faster.
+
+### Numerical Validation
+
+The soft-chip kernel was validated against AutoBitLinear across 6 layers of varying sizes:
+
+| Layer | Shape | NRMSE | Cosine Sim |
+|---|---|---|---|
+| layer 0, q_proj | 2560x2560 | 2.7e-8 | 1.0000005 |
+| layer 0, k_proj | 640x2560 | 3.3e-8 | 1.0000000 |
+| layer 0, gate_proj | 6912x2560 | 3.2e-8 | 1.0000005 |
+| layer 0, down_proj | 2560x6912 | 7.2e-6 | 1.0000002 |
+| layer 15, q_proj | 2560x2560 | 3.2e-8 | 1.0000000 |
+| layer 29, o_proj | 2560x2560 | 3.1e-8 | 1.0000000 |
+
+The kernel produces essentially identical output to PyTorch's AutoBitLinear when both use the same FP32 precision for quantization. The larger NRMSE for `down_proj` (6912 input features) is due to longer accumulation chains. Cross-validation against actual AutoBitLinear.forward() (which uses BF16 internally) shows max diff = 0.63 and cosine sim = 0.9997 -- the difference is from BF16 vs FP32 arithmetic, not from the ternary logic.
+
+### PyTorch Integration
+
+The soft-chip is integrated as a drop-in replacement via monkey-patching:
+
+```python
+from softchip.torch_ternary import patch_model, unpatch_model
+
+model = AutoModelForCausalLM.from_pretrained(...)
+patch_model(model)       # Replaces AutoBitLinear.forward with C kernel
+output = model(input)    # 4.6x faster forward pass
+unpatch_model(model)     # Restore original
+```
+
+Weight packing (one-time cost at load): ~48s for 210 layers. The backward pass is unchanged -- STE requires BF16 master weights, so backward falls through to PyTorch.
 
 ### Source
 
 - `softchip/ternary_matmul.c` -- v1 prototype (scalar decode, 221ms)
-- `softchip/ternary_matmul_v2.c` -- v2 production (LUT + AVX2, 13.2ms)
+- `softchip/ternary_matmul_v2.c` -- v2 LUT decode (LUT + AVX2, 13.2ms)
+- `softchip/ternary_matmul_v3.c` -- v3 production (smart threading, 1.6ms M=1)
+- `softchip/torch_ternary.py` -- PyTorch integration (patch_model/unpatch_model)
+- `test_softchip_accuracy.py` -- numerical validation test
+- `bench_softchip_model.py` -- full model benchmark
 
 ```bash
-# Compile and benchmark
+# Compile kernel
+gcc -O3 -mavx2 -mfma -march=native -fopenmp -shared -fPIC \
+    -o softchip/ternary_matmul_v3.so softchip/ternary_matmul_v3.c -lm
+
+# Standalone benchmark
 gcc -O3 -mavx2 -mfma -march=native -fopenmp -DSTANDALONE_TEST \
-    -o softchip/ternary_bench_v2 softchip/ternary_matmul_v2.c -lm
-./softchip/ternary_bench_v2
+    -o softchip/ternary_bench_v3 softchip/ternary_matmul_v3.c -lm
+./softchip/ternary_bench_v3
+
+# Numerical validation (requires model)
+python test_softchip_accuracy.py
+
+# Full model benchmark
+python bench_softchip_model.py
 ```
 
 ## Next Steps
 
-### Phase 1: Thor Deployment
-- Port validation code to Jetson AGX Thor (128GB unified memory, Blackwell GPU)
+### Phase 1: Thor Deployment (NEXT)
+- Port validation code + soft-chip to Jetson AGX Thor (128GB unified memory, Blackwell GPU)
 - Verify GPU-accelerated forward/backward pass (~1-5s expected)
 - Set up bitnet.cpp for fast rollout generation (~35 tok/s on CPU, faster on GPU)
+- The soft-chip CPU kernel may also be useful on Thor's 14-core ARM Neoverse V3AE cores
 
 ### Phase 2: GRPO Training Loop
 - Implement GRPO reward computation on GSM8K (verifiable correct/incorrect answers)
 - BitNet b1.58 baseline: 58.38% GSM8K accuracy
+- Use soft-chip for fast rollout generation, PyTorch for gradient computation
 - Run first TinyLoRA + GRPO training cycle, measure improvement
 
 ### Phase 3: Autoresearch Loop
@@ -206,8 +261,14 @@ huggingface-cli download microsoft/bitnet-b1.58-2B-4T-bf16 --local-dir models/bi
 # Note: remove auto_map from config.json if using transformers >= 5.0
 # (BitNet is natively supported, custom code files not needed)
 
-# Run validation
+# Run TinyLoRA validation
 python test_bitnet_tinylora.py
+
+# Build and benchmark soft-chip kernel (requires AVX2)
+gcc -O3 -mavx2 -mfma -march=native -fopenmp -shared -fPIC \
+    -o softchip/ternary_matmul_v3.so softchip/ternary_matmul_v3.c -lm
+python test_softchip_accuracy.py    # Numerical validation
+python bench_softchip_model.py      # Full model benchmark
 ```
 
 ## LMM Analysis
@@ -224,3 +285,10 @@ The Lincoln Manifold Method was used to analyze this problem through two complet
 - Led directly to the successful validation documented here
 
 The pivot from LFM2-24B to BitNet b1.58 was driven by the REFLECT phase identifying that BitNet's standard transformer architecture eliminates the LoRA compatibility uncertainty that plagued the LFM2 approach, while its 0.4GB footprint makes the Thor's 128GB memory absurdly generous rather than barely sufficient.
+
+### Pass 3: Soft-Chip Optimization Opportunities
+- `journal/softchip_opt_raw.md` through `journal/softchip_opt_synth.md`
+- Identified: at ~9% of peak FP32, bottleneck is instruction throughput not memory bandwidth
+- Key finding: M=1 (autoregressive) is the critical use case; OpenMP thread overhead makes parallel worse than serial for small batch
+- Decision: smart threading (serial for M<6, parallel for M>=6) + numerical validation gate before PyTorch integration
+- Led directly to v3 kernel (4.3x M=1 improvement) and validated PyTorch integration (4.6x full-model speedup)
