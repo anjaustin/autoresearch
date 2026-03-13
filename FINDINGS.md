@@ -94,9 +94,23 @@ Total: 210 `AutoBitLinear` layers + embedding + LM head = 212 linear-like layers
 
 Standard LoRA adds a bypass path: `output = base(x) + BA(x)`. The bypass operates on the full-precision input `x` independently of what the base layer does internally. BitNet's `AutoBitLinear` quantizes master weights to {-1, 0, +1} during the forward pass, but the LoRA bypass path never touches those ternary weights. The gradient flows through the bypass path cleanly.
 
-### The 208s Backward Pass
+### The Backward Pass: From 208s to ~48s
 
-The backward pass through 2.41B parameters on a Ryzen 5 CPU takes 208 seconds. This confirms that CPU-only GRPO training (which needs many forward+backward passes per step) is impractical for iterative experiments. However, on a Jetson AGX Thor with Blackwell GPU, this would be ~1-5 seconds.
+The initial backward pass through 2.41B parameters on a Ryzen 5 CPU took 208 seconds (19 tokens). This was identified as the critical bottleneck for GRPO training.
+
+**Key insight:** The backward pass through frozen AutoBitLinear layers computes `grad_input = W^T @ grad_output`. Since W is ternary post-STE, this is the **same add/subtract/skip pattern** the soft-chip exploits for forward. No weight gradients are needed (frozen layers), only the gradient signal propagating backward.
+
+A `ternary_matmul_backward` kernel was added using an **accumulate-scatter** approach: iterate over N weight rows (cache-friendly sequential reads of row-major packed weights), scatter-add each row's contribution scaled by `grad_output[n]`. Uses the same AVX2 XOR+AND bit trick as the forward kernel. No activation quantization (STE passes gradients through unchanged).
+
+| Metric (6 tokens) | Stock PyTorch | CPU Soft-Chip | Speedup |
+|-------------------|--------------|--------------|---------|
+| Forward | 8.8s | 1.2s | 7.2x |
+| **Backward** | **82.9s** | **19.5s** | **4.3x** |
+| **Total** | **91.7s** | **20.7s** | **4.4x** |
+
+Isolated backward kernel: 2.05ms per 2560×2560 M=1 (1.32x forward time). All layer shapes validated at NRMSE < 2e-6 vs PyTorch reference.
+
+Projected for 19 tokens (original benchmark): backward ~48s (down from 208s), total forward+backward ~52s (down from ~220s). This makes CPU-only GRPO training feasible — a single gradient step takes under a minute rather than nearly 4 minutes.
 
 ### What Remains Unknown
 
@@ -202,9 +216,10 @@ Weight packing (one-time cost at load): ~48s for 210 layers. The backward pass i
 
 - `softchip/ternary_matmul.c` -- v1 prototype (scalar decode, 221ms)
 - `softchip/ternary_matmul_v2.c` -- v2 LUT decode (LUT + AVX2, 13.2ms)
-- `softchip/ternary_matmul_v3.c` -- v3 production (smart threading, 1.6ms M=1)
-- `softchip/torch_ternary.py` -- PyTorch integration (patch_model/unpatch_model)
+- `softchip/ternary_matmul_v3.c` -- v3 production (smart threading, 1.6ms M=1, + backward kernel)
+- `softchip/torch_ternary.py` -- PyTorch integration (patch_model/unpatch_model, ternary forward+backward)
 - `test_softchip_accuracy.py` -- numerical validation test
+- `test_backward.py` -- backward kernel validation and benchmark
 - `bench_softchip_model.py` -- full model benchmark
 
 ```bash

@@ -271,6 +271,113 @@ void ternary_matmul(const uint8_t *packed_w,
 }
 
 /* -----------------------------------------------------------------------
+ * Backward pass: grad_input = W^T @ grad_output (no activation quantization)
+ *
+ * For STE through frozen AutoBitLinear layers. Gradients pass through
+ * unchanged (no INT8 quantization). Uses accumulate-scatter approach:
+ * iterate over N weight rows (cache-friendly sequential reads), scatter
+ * each row's contribution scaled by grad_output[n] into grad_input.
+ *
+ * Weight matrix: (out_features × in_features), packed row-major
+ * grad_output: (batch × out_features) -- gradient from downstream
+ * grad_input: (batch × in_features) -- gradient to upstream
+ *
+ * grad_input[m,k] = weight_scale * sum_n(W_ternary[n,k] * grad_output[m,n])
+ * ----------------------------------------------------------------------- */
+
+/* AVX2 ternary scatter-add: grad_input += W_row * scalar */
+static inline void ternary_scatter_add(const uint8_t *packed_w,
+                                        float *grad_input,
+                                        float scalar,
+                                        int in_features) {
+    __m256 vs = _mm256_set1_ps(scalar);
+    __m256 vns = _mm256_set1_ps(-scalar);
+
+    int k = 0;
+    for (; k + 7 < in_features; k += 8) {
+        uint8_t b0 = packed_w[k / 4];
+        uint8_t b1 = packed_w[k / 4 + 1];
+
+        __m128i nz_lo  = _mm_load_si128((const __m128i *)lut_nz[b0]);
+        __m128i sg_lo  = _mm_load_si128((const __m128i *)lut_sign[b0]);
+        __m128i nz_hi  = _mm_load_si128((const __m128i *)lut_nz[b1]);
+        __m128i sg_hi  = _mm_load_si128((const __m128i *)lut_sign[b1]);
+
+        __m256i nz256 = _mm256_set_m128i(nz_hi, nz_lo);
+        __m256i sg256 = _mm256_set_m128i(sg_hi, sg_lo);
+
+        /* For +1 weights: add scalar. For -1 weights: add -scalar. For 0: add 0.
+         * Reuse XOR+AND trick: XOR flips sign for -1 weights, AND zeros for 0 weights.
+         * contribution = (scalar XOR sign_mask) AND nonzero_mask */
+        __m256 signed_s = _mm256_xor_ps(vs, _mm256_castsi256_ps(sg256));
+        __m256 masked = _mm256_and_ps(signed_s, _mm256_castsi256_ps(nz256));
+
+        __m256 current = _mm256_loadu_ps(grad_input + k);
+        _mm256_storeu_ps(grad_input + k, _mm256_add_ps(current, masked));
+    }
+
+    /* Scalar tail */
+    for (; k < in_features; k++) {
+        uint8_t byte = packed_w[k / 4];
+        uint8_t code = (byte >> ((k % 4) * 2)) & 0x03;
+        if (code == 0x01)      grad_input[k] += scalar;
+        else if (code == 0x03) grad_input[k] -= scalar;
+    }
+}
+
+void ternary_matmul_backward(const uint8_t *packed_w,
+                              const float *grad_output,
+                              float *grad_input,
+                              int batch,
+                              int out_features,
+                              int in_features,
+                              float weight_scale) {
+
+    init_lut();
+
+    int packed_row_bytes = (in_features + 3) / 4;
+
+    /*
+     * Threading strategy: same as forward.
+     * For M=1 (autoregressive backward), serial is better.
+     * For M>=6, parallelize over batch.
+     */
+    if (batch >= 6) {
+        #pragma omp parallel for schedule(dynamic)
+        for (int m = 0; m < batch; m++) {
+            const float *go = grad_output + m * out_features;
+            float *gi = grad_input + m * in_features;
+
+            /* Zero output */
+            memset(gi, 0, in_features * sizeof(float));
+
+            /* Accumulate: for each weight row, scatter-add */
+            for (int n = 0; n < out_features; n++) {
+                float g_scaled = go[n] * weight_scale;
+                if (fabsf(g_scaled) < 1e-30f) continue;  /* Skip negligible */
+                const uint8_t *w_row = packed_w + n * packed_row_bytes;
+                ternary_scatter_add(w_row, gi, g_scaled, in_features);
+            }
+        }
+    } else {
+        /* Serial path for M=1 backward */
+        for (int m = 0; m < batch; m++) {
+            const float *go = grad_output + m * out_features;
+            float *gi = grad_input + m * in_features;
+
+            memset(gi, 0, in_features * sizeof(float));
+
+            for (int n = 0; n < out_features; n++) {
+                float g_scaled = go[n] * weight_scale;
+                if (fabsf(g_scaled) < 1e-30f) continue;
+                const uint8_t *w_row = packed_w + n * packed_row_bytes;
+                ternary_scatter_add(w_row, gi, g_scaled, in_features);
+            }
+        }
+    }
+}
+
+/* -----------------------------------------------------------------------
  * Standalone benchmark -- tests both M=19 (batched) and M=1 (autoregressive)
  * ----------------------------------------------------------------------- */
 #ifdef STANDALONE_TEST

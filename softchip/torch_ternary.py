@@ -70,6 +70,17 @@ def _ensure_lib():
         ctypes.c_float,
     ]
 
+    _lib.ternary_matmul_backward.restype = None
+    _lib.ternary_matmul_backward.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_float,
+    ]
+
     return _lib
 
 
@@ -223,7 +234,11 @@ class PackedWeight:
 class TernaryMatmulFunction(torch.autograd.Function):
     """
     Forward: use soft-chip C kernel (CPU, fast, ternary-optimized)
-    Backward: fall back to PyTorch (STE through BF16 master weights)
+    Backward: use ternary backward kernel (STE: grad_input = W^T @ grad_output)
+
+    No activation quantization in backward -- gradients pass through unchanged
+    per the Straight-Through Estimator. The ternary weight structure means
+    backward is also just add/subtract/skip, same as forward.
     """
 
     @staticmethod
@@ -256,21 +271,42 @@ class TernaryMatmulFunction(torch.autograd.Function):
         )
         output = output.reshape(*orig_shape[:-1], pw.out_features)
 
-        ctx.save_for_backward(input_tensor)
-        ctx.original_layer = original_layer
+        # Save packed weight info for backward (not input_tensor — not needed)
+        ctx.packed_weight = packed_weight
+        ctx.orig_shape = orig_shape
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        (input_tensor,) = ctx.saved_tensors
-        original_layer = ctx.original_layer
+        lib = _ensure_lib()
+        pw = ctx.packed_weight
 
-        with torch.enable_grad():
-            input_detached = input_tensor.detach().requires_grad_(True)
-            output = original_layer(input_detached)
-            output.backward(grad_output)
+        # grad_output: (*orig_shape[:-1], out_features)
+        go_2d = grad_output.reshape(-1, pw.out_features)
+        batch = go_2d.shape[0]
 
-        return input_detached.grad, None, None
+        go_f32 = go_2d.float().contiguous().numpy()
+        go_ptr = go_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        gi_f32 = np.empty((batch, pw.in_features), dtype=np.float32)
+        gi_ptr = gi_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        lib.ternary_matmul_backward(
+            pw.packed_ptr,
+            go_ptr,
+            gi_ptr,
+            batch,
+            pw.out_features,
+            pw.in_features,
+            pw.weight_scale,
+        )
+
+        grad_input = torch.from_numpy(gi_f32).to(
+            device=grad_output.device, dtype=grad_output.dtype
+        )
+        grad_input = grad_input.reshape(*ctx.orig_shape)
+
+        return grad_input, None, None
 
 
 class VulkanMatmulFunction(torch.autograd.Function):
