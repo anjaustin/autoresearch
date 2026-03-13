@@ -28,3 +28,6 @@ models/
 # Compiled shared libraries and SPIR-V shaders
 *.so
 *.spv
+
+# Jupyter
+.ipynb_checkpoints/

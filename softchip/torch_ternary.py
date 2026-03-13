@@ -10,18 +10,21 @@ performance on CPUs without AMX/VNNI (e.g. Ryzen) by casting the LM head
 weight to FP32 and using a custom autograd function.
 
 Backend selection:
-    - "vulkan": Use Vega 7 iGPU via Vulkan compute (fastest for M=1)
-    - "cpu": Use AVX2 kernel (fallback)
+    - "cpu": Use AVX2 kernel (production path — fastest end-to-end on Ryzen)
+    - "vulkan": Use Vega 7 iGPU via Vulkan compute (faster raw shader but
+      submit overhead makes it slower end-to-end than CPU)
     - "auto": Try Vulkan first, fall back to CPU
 
 Usage:
-    from softchip.torch_ternary import patch_model, patch_lm_head_fp32, unpatch_model
+    from softchip.torch_ternary import (
+        patch_model, patch_lm_head_fp32, unpatch_model, unpatch_lm_head
+    )
 
     model = AutoModelForCausalLM.from_pretrained(...)
-    patch_model(model, backend="auto")    # Ternary soft-chip for AutoBitLinear
-    patch_lm_head_fp32(model)             # FP32 for LM head (17x speedup on Ryzen)
+    patch_model(model, backend="cpu")     # Ternary soft-chip for AutoBitLinear
+    patch_lm_head_fp32(model)             # FP32 for LM head (18x backward speedup on Ryzen)
     output = model(input)
-    unpatch_model(model)                  # Restore everything
+    unpatch_model(model)                  # Restore everything (incl. LM head)
 """
 
 import ctypes

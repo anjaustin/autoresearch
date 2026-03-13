@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-LMM Pass 5 RAW: Profile the backward pass to understand where 17.9s goes.
+LMM Pass 5 RAW: Profile the backward pass to identify bottlenecks.
 
 Instruments the model to measure time in each operation category during backward.
+Key finding: LM head (nn.Linear, 128256x2560, dense BF16) consumed 92.6% of
+backward time due to MKL's catastrophically slow BF16 GEMM on Zen 3.
 """
 
 import sys

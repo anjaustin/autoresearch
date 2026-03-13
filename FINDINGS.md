@@ -115,6 +115,8 @@ Backward breakdown after both optimizations:
 
 A training iteration now takes **2.4 seconds** — fast enough for interactive experimentation (25 iterations/minute).
 
+**Parallelization attempt (LMM Pass 6):** OpenMP parallelization over N within the backward kernel achieved 3.4x kernel speedup in isolation but caused a 9% end-to-end regression due to OpenMP/MKL thread pool contention. Serial backward remains the production path. The backward is at its practical ceiling on this hardware within the PyTorch autograd framework.
+
 ### What Remains Unknown
 
 1. **Does RL (GRPO) with TinyLoRA improve BitNet's task performance?** The validation proves mechanics, not effectiveness. The TinyLoRA paper showed RL enables extreme parameter reduction on dense transformers (Qwen2.5-8B). Whether this transfers to ternary architectures requires actual training experiments.
@@ -492,6 +494,7 @@ gcc -O3 -mavx2 -mfma -march=native -fopenmp -shared -fPIC \
 python test_softchip_accuracy.py    # Numerical validation
 python test_backward.py             # Backward kernel validation
 python test_lm_head_fp32.py         # FP32 LM head validation + full stack benchmark
+python profile_backward.py          # Backward pass profiling
 python bench_softchip_model.py      # Full model benchmark
 
 # Build and benchmark soft-chip GPU kernel (requires Vulkan + AMD iGPU)
@@ -500,11 +503,13 @@ glslangValidator -V softchip/ternary_matmul_v3.comp -o softchip/ternary_matmul_v
 gcc -O2 -shared -fPIC -o softchip/libvk_ternary.so softchip/vk_backend.c -lvulkan -lm -ldl
 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json python softchip/test_vk_backend.py
 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json python test_vk_model.py
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json python bench_vk_model.py
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json python bench_vk_dispatch_overhead.py
 ```
 
 ## LMM Analysis
 
-The Lincoln Manifold Method was used to analyze this problem through five complete passes:
+The Lincoln Manifold Method was used to analyze this problem through six complete passes:
 
 ### Pass 1: LFM2-24B-A2B + TinyLoRA on Jetson AGX Thor
 - `journal/lfm2_tinylora_raw.md` through `journal/lfm2_tinylora_synth.md`
@@ -543,3 +548,13 @@ The pivot from LFM2-24B to BitNet b1.58 was driven by the REFLECT phase identify
 - Result: backward 19,500ms → **1,065ms** (**18.3x speedup**), total iteration 20,700ms → **2,410ms** (**8.6x speedup**)
 - Memory cost: +657 MB for FP32 copy (trivial with 64 GB RAM)
 - Cumulative speedup from stock PyTorch: **38x** (91,700ms → 2,410ms)
+
+### Pass 6: Parallel Backward — Negative Result
+- `journal/backward_parallel_raw.md` through `journal/backward_parallel_synth.md`
+- Attempted OpenMP parallelization over N (out_features) within `ternary_matmul_backward()` using per-thread static buffers + AVX2 reduction
+- **Kernel-level result:** 3.4x speedup in isolation (548ms → 162ms, all 4 shapes validated)
+- **End-to-end result:** 9% regression (1,065ms → 1,160ms). Reverted to serial.
+- Root cause: OpenMP/MKL thread pool contention. Rapid alternation between our OpenMP threads and PyTorch's MKL threads (both claiming 12 threads on 6 cores) caused cache thrashing and scheduling overhead that negated the kernel speedup.
+- Tested 5 configurations (thread counts 3/6/12, OMP_WAIT_POLICY, higher thresholds) — none beat serial end-to-end
+- Same class of finding as Pass 3 (serial beats threaded for M<6 forward): on this CPU, micro-benchmark parallelism doesn't transfer when multiple thread pools compete in rapid alternation
+- **Decision:** Serial backward is the production path. The backward is at its practical ceiling on this hardware within PyTorch autograd.
