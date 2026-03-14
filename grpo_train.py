@@ -12,12 +12,15 @@ Usage: python grpo_train.py
 """
 
 import json
+import hashlib
 import math
 import os
 import random
 import re
 import sys
 import time
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from pathlib import Path
 
 import torch
@@ -100,27 +103,86 @@ def extract_answer(text):
             s = s[:-1]
         return s
 
-    # Try "The answer is X" format
-    match = re.search(r"[Tt]he answer is\s*\$?\\?boxed\{?\s*(-?[\d,]+\.?\d*)", text)
-    if match:
-        return clean_number(match.group(1))
+    def parse_candidate(s):
+        s = s.strip()
+        frac = re.search(r"(-?[\d,]+\s*/\s*-?[\d,]+)", s)
+        if frac:
+            return clean_number(frac.group(1).replace(" ", ""))
+        num = re.search(r"(-?[\d,]+\.?\d*)", s)
+        if num:
+            return clean_number(num.group(1))
+        return None
+
+    # Strongest signal: explicit answer phrase. Prefer the LAST such phrase.
+    answer_spans = re.findall(r"[Tt]he answer is\s*([^\n]+)", text)
+    if answer_spans:
+        parsed = parse_candidate(answer_spans[-1])
+        if parsed is not None:
+            return parsed
+
     # Try "#### X" format (GSM8K native)
+    match = re.search(r"####\s*(-?[\d,]+\s*/\s*-?[\d,]+)", text)
+    if match:
+        return clean_number(match.group(1).replace(" ", ""))
     match = re.search(r"####\s*(-?[\d,]+\.?\d*)", text)
     if match:
         return clean_number(match.group(1))
-    # Fall back to last number in text
+    # Fall back to last number in text. Prefer numeric terminals over fractions,
+    # because fractions often appear as intermediate reasoning steps.
     numbers = re.findall(r"-?[\d,]+\.?\d*", text)
     if numbers:
         return clean_number(numbers[-1])
+    fractions = re.findall(r"-?[\d,]+\s*/\s*-?[\d,]+", text)
+    if fractions:
+        return clean_number(fractions[-1].replace(" ", ""))
     return None
 
 
 def extract_gsm8k_answer(answer_text):
     """Extract ground truth from GSM8K answer field."""
+    match = re.search(r"####\s*(-?[\d,]+\s*/\s*-?[\d,]+)", answer_text)
+    if match:
+        return match.group(1).replace(",", "").replace(" ", "").strip()
     match = re.search(r"####\s*(-?[\d,]+\.?\d*)", answer_text)
     if match:
         return match.group(1).replace(",", "").strip()
     return None
+
+
+def normalize_answer(answer):
+    """Normalize numeric answers for exact-value comparison.
+
+    Returns a canonical string when parsing succeeds, else the stripped input.
+    Supports integers, decimals, and simple fractions.
+    """
+    if answer is None:
+        return None
+
+    s = answer.replace(",", "").strip()
+    if not s:
+        return None
+
+    # Remove trivial trailing period.
+    if s.endswith(".") and s.count(".") == 1:
+        s = s[:-1]
+
+    try:
+        if "/" in s:
+            value = Fraction(s)
+            return str(value)
+        value = Decimal(s)
+        if value == value.to_integral():
+            return str(int(value))
+        return format(value.normalize(), "f").rstrip("0").rstrip(".")
+    except (ValueError, ZeroDivisionError, InvalidOperation):
+        return s
+
+
+def answers_match(predicted, ground_truth):
+    """Compare answers after numeric normalization."""
+    pred_norm = normalize_answer(predicted)
+    gt_norm = normalize_answer(ground_truth)
+    return pred_norm is not None and gt_norm is not None and pred_norm == gt_norm
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +223,7 @@ def inject_adapters(model):
         if module.__class__.__name__ != "AutoBitLinear":
             continue
         # Deterministic seed from layer name
-        seed = hash(name) % (2**31)
+        seed = int.from_bytes(hashlib.sha256(name.encode("utf-8")).digest()[:8], "big")
         adapter = TinyLoRA(module, seed=seed)
         # Replace in parent
         parts = name.rsplit(".", 1)
@@ -278,8 +340,11 @@ def _should_stop(text):
     # Stop if model starts generating a new question
     if "Q:" in text:
         return True
-    # Stop after a completed answer sentence.
-    if re.search(r"[Tt]he answer is\s*-?[\d,]+(?:\.\d+)?\.?\s*$", text):
+    # Stop after a completed answer sentence, including simple fractions.
+    if re.search(
+        r"[Tt]he answer is\s*(?:-?[\d,]+(?:\.\d+)?|-?[\d,]+\s*/\s*-?[\d,]+)\.?\s*$",
+        text,
+    ):
         return True
     return False
 
@@ -361,9 +426,7 @@ def grpo_step(
     for comp_text in completion_texts:
         pred = extract_answer(comp_text)
         predicted_answers.append(pred)
-        reward = (
-            1.0 if pred is not None and pred.strip() == ground_truth.strip() else 0.0
-        )
+        reward = 1.0 if answers_match(pred, ground_truth) else 0.0
         rewards.append(reward)
 
     # 3. ADVANTAGE: Group-normalize rewards
@@ -403,9 +466,11 @@ def grpo_step(
 
         # Forward without adapters (π_ref) — no grad
         saved_scales = zero_adapter_scales(adapters)
-        with torch.no_grad():
-            log_probs_ref = compute_log_probs(model, comp_ids, prompt_len)
-        restore_adapter_scales(adapters, saved_scales)
+        try:
+            with torch.no_grad():
+                log_probs_ref = compute_log_probs(model, comp_ids, prompt_len)
+        finally:
+            restore_adapter_scales(adapters, saved_scales)
 
         # REINFORCE loss: -advantage * sum(log π_θ)
         reinforce_loss = -advantage * log_probs_theta.sum()
@@ -491,7 +556,7 @@ def evaluate(model, tokenizer, test_data, num_samples=EVAL_SAMPLES):
         comp_text = tokenizer.decode(comp_ids[0, prompt_len:], skip_special_tokens=True)
         pred = extract_answer(comp_text)
 
-        is_correct = pred is not None and pred.strip() == ground_truth.strip()
+        is_correct = answers_match(pred, ground_truth)
         if is_correct:
             correct += 1
         total += 1
@@ -528,6 +593,13 @@ def save_checkpoint(adapters, optimizer, step, eval_history, config):
             "adapter_scales": {
                 name: adapter.scale.data.clone() for name, adapter in adapters
             },
+            "adapter_state": {
+                name: {
+                    "u": adapter.u.clone(),
+                    "v": adapter.v.clone(),
+                }
+                for name, adapter in adapters
+            },
             "optimizer_state": optimizer.state_dict(),
             "eval_history": eval_history,
             "config": config,
@@ -544,6 +616,9 @@ def load_checkpoint(path, adapters, optimizer):
     for name, adapter in adapters:
         if name in ckpt["adapter_scales"]:
             adapter.scale.data.copy_(ckpt["adapter_scales"][name])
+        if name in ckpt.get("adapter_state", {}):
+            adapter.u.copy_(ckpt["adapter_state"][name]["u"])
+            adapter.v.copy_(ckpt["adapter_state"][name]["v"])
     if ckpt.get("optimizer_state"):
         optimizer.load_state_dict(ckpt["optimizer_state"])
     return ckpt["step"], ckpt.get("eval_history", [])
@@ -702,7 +777,10 @@ def main():
     t0 = time.time()
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, fix_mistral_regex=True)
+    except TypeError:
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_PATH,
         torch_dtype=torch.bfloat16,
