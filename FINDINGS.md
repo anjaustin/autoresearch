@@ -117,13 +117,55 @@ A training iteration now takes **2.4 seconds** — fast enough for interactive e
 
 **Parallelization attempt (LMM Pass 6):** OpenMP parallelization over N within the backward kernel achieved 3.4x kernel speedup in isolation but caused a 9% end-to-end regression due to OpenMP/MKL thread pool contention. Serial backward remains the production path. The backward is at its practical ceiling on this hardware within the PyTorch autograd framework.
 
+### GRPO Status: First On-Policy Update Works
+
+LMM Pass 7 implemented the missing RL loop in `grpo_train.py`: KV-cache rollout generation, GSM8K reward extraction, group-normalized advantages, REINFORCE-style policy loss, optional reference-policy KL evaluation, checkpointing, and evaluation helpers.
+
+The key implementation bug was not in the gradient path but in **rollout termination**. With a few-shot prompt, BitNet often answered correctly and then continued into a synthetic next example (`Q: ...`). A naive "last number wins" extractor therefore scored the wrong number. The fix was twofold:
+
+1. **Stop generation at the first completed answer** -- halt on `Q:` or a completed `The answer is X` span.
+2. **Ignore continuation text during answer extraction** -- strip anything after the first generated `Q:` before parsing the final answer.
+
+After this fix, the system produced the first real mixed-reward GRPO update on GSM8K.
+
+#### Short GRPO Run (3 prompts, GSM8K train split)
+
+Settings: `G=4`, `max_new_tokens=64`, CPU soft-chip + FP32 LM head, 210 TinyLoRA scalar adapters.
+
+| Step | GSM8K idx | Rewards | Predictions | Ground Truth | Result | Wall Time |
+|------|-----------|---------|-------------|--------------|--------|-----------|
+| 1 | 0 | [1, 1, 1, 1] | [72, 72, 72, 72] | 72 | skipped (zero variance) | 323.7s |
+| 2 | 1 | [1, 0, 1, 1] | [10, 6, 10, 10] | 10 | **update applied** | 842.3s |
+| 3 | 2 | [1, 1, 1, 1] | [5, 5, 5, 5] | 5 | skipped (zero variance) | 509.5s |
+
+Short-run summary:
+
+- Steps run: 3
+- Steps skipped: 2
+- Steps updated: 1
+- Mean step time: **558.5s** (9.3 min)
+- Mean reward across all 12 rollouts: **0.917**
+- Mean adapter gradient on the update step: **3.78e-05**
+- Mean absolute adapter scale after the update: **0.0100**
+- Max absolute adapter scale after the update: **0.01007**
+
+This is the first confirmation that:
+
+- GRPO rollouts can be generated on the Ryzen-only stack
+- GSM8K reward extraction works under few-shot prompting
+- Mixed rewards occur naturally on real GSM8K problems
+- The mixed-reward case produces a non-zero policy gradient
+- A 210-parameter TinyLoRA policy can take an on-policy RL update on frozen BitNet
+
 ### What Remains Unknown
 
-1. **Does RL (GRPO) with TinyLoRA improve BitNet's task performance?** The validation proves mechanics, not effectiveness. The TinyLoRA paper showed RL enables extreme parameter reduction on dense transformers (Qwen2.5-8B). Whether this transfers to ternary architectures requires actual training experiments.
+1. **Does repeated RL (GRPO) with TinyLoRA improve BitNet's task performance over a full run?** We now have a working update step, but not yet a statistically meaningful training curve.
 
-2. **Which layers are highest leverage for adaptation?** We adapted q_proj in the first 4 layers. The full search space (210 layers, various types) is what the autoresearch loop should explore.
+2. **What is the true skip rate over a long run?** In the first 3-prompt run, 2/3 steps were skipped because all 4 samples agreed. Early data suggests many easy prompts collapse to all-correct groups, which wastes rollout budget.
 
-3. **What is the minimum parameter count that produces meaningful improvement?** TinyLoRA achieved 91% GSM8K with 13 params on Qwen2.5-8B. The equivalent number for BitNet is unknown.
+3. **Which layers are highest leverage for adaptation?** Pass 7 adapts all 210 `AutoBitLinear` layers. We have not yet analyzed which layer families (attention vs MLP, early vs late) absorb the largest post-update scales.
+
+4. **What is the minimum parameter count that produces meaningful improvement?** TinyLoRA achieved 91% GSM8K with 13 params on Qwen2.5-8B. The equivalent number for BitNet remains unknown.
 
 ## AVX2 Soft-Chip: Ternary Matmul Kernel
 
@@ -449,29 +491,22 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json ./softchip/vk_te
 
 ## Next Steps
 
-### Phase 1: GRPO Training Loop (NEXT)
-- With 2.4s per training iteration, CPU-only GRPO training is now practical
-- Implement GRPO reward computation on GSM8K (verifiable correct/incorrect answers)
-- BitNet b1.58 baseline: 58.38% GSM8K accuracy
-- Use soft-chip for fast rollout generation, full optimized stack for gradient computation
-- Run first TinyLoRA + GRPO training cycle, measure improvement
+### Phase 1: Longer GRPO Runs (CURRENT)
+- Run a full overnight GRPO session on the Ryzen stack using `grpo_train.py`
+- Measure skip rate, reward rate, and GSM8K eval accuracy over time
+- Log which of the 210 adapter scales move most under RL updates
+- Add curriculum or prompt filtering if all-correct / all-wrong groups waste too much rollout budget
 
-### Phase 2: Thor Deployment
-- Port validation code + soft-chip to Jetson AGX Thor (128GB unified memory, Blackwell GPU)
-- Verify GPU-accelerated forward/backward pass (~1-5s expected)
-- BF16 GEMM will be fast natively on Blackwell (FP32 LM head patch not needed)
-- Set up bitnet.cpp for fast rollout generation (~35 tok/s on CPU, faster on GPU)
+### Phase 2: Autoresearch Loop
+- Build the autonomous experiment loop around the working GRPO inner loop
+- Search space: layer subsets, number of adapted layers, learning rate, group size, temperature, max tokens
+- Use overnight runs to compare configurations by reward rate, skip rate, and eval accuracy
 
-### Phase 3: Autoresearch Loop
-- Build autonomous experiment loop (propose adapter config, train, evaluate, keep/discard)
-- Search space: layer selection, number of adapted layers, learning rate, GRPO hyperparams
-- Target: overnight runs producing 30+ experiments
-
-### Phase 4: Novel Experiments
-- Adapt all layer types (attention projections, MLP gates, all at once)
+### Phase 3: Novel Experiments
+- Compare all-210 adaptation vs targeted subsets (q_proj only, MLP only, late layers only)
 - Explore higher-rank TinyLoRA (4, 16, 64 params per layer)
 - Compare RL vs SFT parameter efficiency on ternary models
-- Benchmark against full LoRA (rank 8, 16) to measure efficiency frontier
+- Benchmark against full LoRA (rank 8, 16) to measure the efficiency frontier
 
 ## Reproduction
 
@@ -487,6 +522,10 @@ huggingface-cli download microsoft/bitnet-b1.58-2B-4T-bf16 --local-dir models/bi
 
 # Run TinyLoRA validation
 python test_bitnet_tinylora.py
+
+# Run GRPO pre-flight or training
+python grpo_train.py --preflight
+python grpo_train.py
 
 # Build and benchmark soft-chip CPU kernel (requires AVX2)
 gcc -O3 -mavx2 -mfma -march=native -fopenmp -shared -fPIC \
@@ -509,7 +548,7 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json python bench_vk_
 
 ## LMM Analysis
 
-The Lincoln Manifold Method was used to analyze this problem through six complete passes:
+The Lincoln Manifold Method was used to analyze this problem through seven complete passes:
 
 ### Pass 1: LFM2-24B-A2B + TinyLoRA on Jetson AGX Thor
 - `journal/lfm2_tinylora_raw.md` through `journal/lfm2_tinylora_synth.md`
@@ -558,3 +597,11 @@ The pivot from LFM2-24B to BitNet b1.58 was driven by the REFLECT phase identify
 - Tested 5 configurations (thread counts 3/6/12, OMP_WAIT_POLICY, higher thresholds) — none beat serial end-to-end
 - Same class of finding as Pass 3 (serial beats threaded for M<6 forward): on this CPU, micro-benchmark parallelism doesn't transfer when multiple thread pools compete in rapid alternation
 - **Decision:** Serial backward is the production path. The backward is at its practical ceiling on this hardware within PyTorch autograd.
+
+### Pass 7: GRPO Training Loop — First RL Update
+- `journal/grpo_tinylora_raw.md` through `journal/grpo_tinylora_synth.md`
+- Implemented `grpo_train.py`: TinyLoRA injection over all 210 `AutoBitLinear` layers, KV-cache rollout generation, GSM8K answer extraction, group-normalized advantages, policy loss, checkpointing, and evaluation helpers
+- Found and fixed the critical rollout bug: the model often answered correctly, then continued into a synthetic next `Q:` block, causing naive answer extraction to score the wrong number
+- Added generation stop conditions (`Q:` / completed `The answer is X`) and answer parsing that strips continuation text before scoring
+- Short 3-prompt run on GSM8K produced the first mixed-reward on-policy update: step 2 yielded rewards `[1,0,1,1]`, predictions `[10,6,10,10]`, non-zero mean gradient `3.78e-05`, and adapter scales moved to mean abs scale `0.0100`
+- **Decision:** the Ryzen-only stack is now sufficient for real TinyLoRA + GRPO experiments; the main bottleneck is rollout wall time and skip rate, not missing infrastructure
