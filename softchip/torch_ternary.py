@@ -179,6 +179,45 @@ def _vk_device_name():
 
 
 # -----------------------------------------------------------------------
+# Load the GhostWeight shared library
+# -----------------------------------------------------------------------
+_GHOST_LIB_PATH = _LIB_DIR / "ghost_matmul.so"
+_ghost_lib = None
+
+
+def _ensure_ghost_lib():
+    global _ghost_lib
+    if _ghost_lib is not None:
+        return _ghost_lib
+
+    if not _GHOST_LIB_PATH.exists():
+        raise RuntimeError(f"GhostWeight library not found at {_GHOST_LIB_PATH}.")
+
+    _ghost_lib = ctypes.CDLL(str(_GHOST_LIB_PATH))
+
+    _ghost_lib.ghost_matmul_forward.argtypes = [
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint64,
+        ctypes.c_int,
+    ]
+    _ghost_lib.ghost_matmul_backward.argtypes = [
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint64,
+        ctypes.c_int,
+    ]
+
+    return _ghost_lib
+
+
+# -----------------------------------------------------------------------
 # Packed weight cache
 # -----------------------------------------------------------------------
 class PackedWeight:
@@ -317,6 +356,85 @@ class TernaryMatmulFunction(torch.autograd.Function):
         return grad_input, None, None
 
 
+class GhostMatmulFunction(torch.autograd.Function):
+    """
+    Forward: regenerate ternary weight on-the-fly from PRNG seed (GhostWeight).
+    Backward: rerun same PRNG to regenerate W^T and compute grad_input (STE).
+
+    No stored weight matrix — the entire layer weight is derived from:
+        base_seed (uint64) + layer_id (int)
+    This collapses a 500 MB weight tensor to 8 bytes.
+    """
+
+    @staticmethod
+    def forward(ctx, input_tensor, base_seed, layer_id, in_features, out_features):
+        lib = _ensure_ghost_lib()
+
+        orig_shape = input_tensor.shape
+        x_2d = input_tensor.reshape(-1, in_features)
+        batch = x_2d.shape[0]
+
+        x_f32 = x_2d.float().contiguous().numpy()
+        x_ptr = x_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        out_f32 = np.empty((batch, out_features), dtype=np.float32)
+        out_ptr = out_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        lib.ghost_matmul_forward(
+            x_ptr,
+            out_ptr,
+            batch,
+            in_features,
+            out_features,
+            ctypes.c_uint64(base_seed),
+            ctypes.c_int(layer_id),
+        )
+
+        output = torch.from_numpy(out_f32).to(
+            device=input_tensor.device, dtype=input_tensor.dtype
+        )
+        output = output.reshape(*orig_shape[:-1], out_features)
+
+        ctx.save_for_backward(input_tensor)
+        ctx.base_seed = base_seed
+        ctx.layer_id = layer_id
+        ctx.in_features = in_features
+        ctx.out_features = out_features
+        ctx.orig_shape = orig_shape
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        lib = _ensure_ghost_lib()
+
+        go_2d = grad_output.reshape(-1, ctx.out_features)
+        batch = go_2d.shape[0]
+
+        go_f32 = go_2d.float().contiguous().numpy()
+        go_ptr = go_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        gi_f32 = np.empty((batch, ctx.in_features), dtype=np.float32)
+        gi_ptr = gi_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        lib.ghost_matmul_backward(
+            go_ptr,
+            gi_ptr,
+            batch,
+            ctx.in_features,
+            ctx.out_features,
+            ctypes.c_uint64(ctx.base_seed),
+            ctypes.c_int(ctx.layer_id),
+        )
+
+        grad_input = torch.from_numpy(gi_f32).to(
+            device=grad_output.device, dtype=grad_output.dtype
+        )
+        grad_input = grad_input.reshape(*ctx.orig_shape)
+
+        # 5 inputs to forward: input_tensor, base_seed, layer_id, in_features, out_features
+        return grad_input, None, None, None, None
+
+
 class VulkanMatmulFunction(torch.autograd.Function):
     """
     Forward: use Vulkan iGPU compute shader (fastest for M=1)
@@ -372,7 +490,7 @@ _PACKED_ATTR = "_softchip_packed_weight"
 _BACKEND_ATTR = "_softchip_backend"
 
 
-def patch_model(model, backend="auto", verbose=True):
+def patch_model(model, backend="auto", verbose=True, use_ghost=False, ghost_seed=42):
     """
     Replace all AutoBitLinear forward passes with soft-chip kernel.
 
@@ -380,10 +498,44 @@ def patch_model(model, backend="auto", verbose=True):
         model: a HuggingFace model with AutoBitLinear layers
         backend: "vulkan", "cpu", or "auto" (try vulkan, fall back to cpu)
         verbose: print progress
+        use_ghost: if True, use GhostWeight kernel (no stored weights, PRNG-only)
+        ghost_seed: uint64 base seed for GhostWeight PRNG (default 42)
 
     Returns:
         Number of layers patched
     """
+    # GhostWeight path: skip weight packing entirely, use PRNG kernel
+    if use_ghost:
+        _ensure_ghost_lib()
+        if verbose:
+            print(f"Soft-chip: using GhostWeight backend (seed={ghost_seed})")
+
+        count = 0
+        for name, module in model.named_modules():
+            if module.__class__.__name__ != "AutoBitLinear":
+                continue
+
+            out_features, in_features = module.weight.shape
+            layer_id = count  # stable index across calls
+
+            setattr(module, _PATCH_ATTR, module.forward)
+            setattr(module, _BACKEND_ATTR, "ghost")
+
+            def make_ghost_forward(lid, K, N, seed):
+                def patched_forward(x):
+                    return GhostMatmulFunction.apply(x, seed, lid, K, N)
+
+                return patched_forward
+
+            module.forward = make_ghost_forward(
+                layer_id, in_features, out_features, ghost_seed
+            )
+            count += 1
+
+        if verbose:
+            print(f"Soft-chip: patched {count} AutoBitLinear layers [GhostWeight]")
+        return count
+
     _ensure_lib()
 
     # Determine backend
