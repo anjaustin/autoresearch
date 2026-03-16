@@ -1,0 +1,29 @@
+============================================================
+  GRPO Training: TinyLoRA on BitNet b1.58 2B4T
+============================================================
+
+[SETUP] Loading model...
+The tokenizer you are loading from 'models/bitnet-b1.58-2B-4T-bf16' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+`torch_dtype` is deprecated! Use `dtype` instead!
+You don't have a GPU available to load the model, the inference will be slow because of weight unpacking
+Loading weights:   0%|          | 0/332 [00:00<?, ?it/s]Loading weights:  70%|██████▉   | 231/332 [00:00<00:00, 2288.86it/s]Loading weights: 100%|██████████| 332/332 [00:00<00:00, 2356.17it/s]
+  Model loaded in 8.4s
+[SETUP] Patching with soft-chip (CPU AVX2)...
+  [GhostWeight] Using PRNG-generated weights (seed=42)
+Soft-chip: using GhostWeight backend (seed=42)
+Soft-chip: patched 210 AutoBitLinear layers [GhostWeight]
+FP32 LM head: converting (128256, 2560) from torch.bfloat16 to float32 (1313 MB)
+FP32 LM head: patched successfully
+[SETUP] Injecting TinyLoRA adapters...
+  Injected 210 adapters (210 trainable params)
+[SETUP] Loading GSM8K dataset...
+  Train: 7473, Test: 1319
+
+============================================================
+  TRAINING START
+  210 adapters, G=2, lr=0.01
+  Time budget: 28800s (8.0h)
+============================================================
+
+[step 0001] SKIP rewards=[0,0] rollout=191s elapsed=192s
+[step 0002] SKIP rewards=[0,0] rollout=208s elapsed=400s

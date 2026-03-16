@@ -213,6 +213,13 @@ def _ensure_ghost_lib():
         ctypes.c_uint64,
         ctypes.c_int,
     ]
+    _ghost_lib.ghost_warm_cache.argtypes = [
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint64,
+    ]
+    _ghost_lib.ghost_free_cache.argtypes = []
 
     return _ghost_lib
 
