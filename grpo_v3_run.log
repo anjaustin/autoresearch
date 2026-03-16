@@ -99,3 +99,423 @@ Q: There are 15 trees in the grove. Grove workers will plant trees in the grove 
 ============================================================
 
 [step 0001] SKIP rewards=[1,1] rollout=131s elapsed=131s
+[step 0002] SKIP rewards=[0,0] rollout=89s elapsed=220s
+[step 0003] SKIP rewards=[1,1] rollout=87s elapsed=307s
+[step 0004] rewards=[0,1] loss=-3.8475 kl=0.0000 |scale|=0.0099 |grad|=6.10e-05 lr=0.0100 rollout=177s update=216.6s total=393s running_r=0.85
+[step 0005] rewards=[1,0] loss=0.3912 kl=0.0249 |scale|=0.0152 |grad|=5.43e-05 lr=0.0100 rollout=78s update=131.9s total=210s running_r=0.84
+[step 0006] SKIP rewards=[1,1] rollout=83s elapsed=994s
+[step 0007] SKIP rewards=[0,0] rollout=100s elapsed=1094s
+[step 0008] SKIP rewards=[1,1] rollout=106s elapsed=1200s
+[step 0009] SKIP rewards=[0,0] rollout=198s elapsed=1397s
+[step 0010] SKIP rewards=[0,0] rollout=116s elapsed=1513s
+  Checkpoint saved: checkpoints/grpo_step_0010.pt
+[step 0011] SKIP rewards=[0,0] rollout=91s elapsed=1604s
+[step 0012] SKIP rewards=[1,1] rollout=121s elapsed=1725s
+[step 0013] SKIP rewards=[1,1] rollout=115s elapsed=1841s
+[step 0014] SKIP rewards=[1,1] rollout=100s elapsed=1940s
+[step 0015] SKIP rewards=[0,0] rollout=111s elapsed=2052s
+[step 0016] SKIP rewards=[1,1] rollout=165s elapsed=2217s
+[step 0017] SKIP rewards=[1,1] rollout=140s elapsed=2356s
+[step 0018] SKIP rewards=[1,1] rollout=148s elapsed=2504s
+[step 0019] SKIP rewards=[0,0] rollout=101s elapsed=2605s
+[step 0020] rewards=[1,0] loss=1.3955 kl=-0.1133 |scale|=0.0190 |grad|=5.90e-05 lr=0.0100 rollout=93s update=155.3s total=248s running_r=0.83
+  Checkpoint saved: checkpoints/grpo_step_0020.pt
+[step 0021] SKIP rewards=[1,1] rollout=185s elapsed=3037s
+[step 0022] SKIP rewards=[0,0] rollout=180s elapsed=3217s
+[step 0023] SKIP rewards=[1,1] rollout=112s elapsed=3330s
+[step 0024] SKIP rewards=[1,1] rollout=108s elapsed=3438s
+[step 0025] rewards=[1,0] loss=-2.3293 kl=-0.4737 |scale|=0.0219 |grad|=9.09e-05 lr=0.0099 rollout=100s update=142.5s total=242s running_r=0.84
+
+[EVAL] Step 25...
+  eval [1/20] pred=26 gt=18 WRONG
+  eval [2/20] pred=3 gt=3 OK
+  eval [3/20] pred=40000 gt=70000 WRONG
+  eval [4/20] pred=540 gt=540 OK
+  eval [5/20] pred=2 gt=20 WRONG
+  eval [6/20] pred=75 gt=64 WRONG
+  eval [7/20] pred=260 gt=260 OK
+  eval [8/20] pred=100 gt=160 WRONG
+  eval [9/20] pred=300 gt=45 WRONG
+  eval [10/20] pred=460 gt=460 OK
+  eval [11/20] pred=366 gt=366 OK
+  eval [12/20] pred=694 gt=694 OK
+  eval [13/20] pred=12 gt=13 WRONG
+  eval [14/20] pred=18 gt=18 OK
+  eval [15/20] pred=60 gt=60 OK
+  eval [16/20] pred=221 gt=125 WRONG
+  eval [17/20] pred=230 gt=230 OK
+  eval [18/20] pred=1450 gt=57500 WRONG
+  eval [19/20] pred=7 gt=7 OK
+  eval [20/20] pred=4 gt=6 WRONG
+  Accuracy: 50.0% (base: 50.0%) [1272s]
+  Checkpoint saved: checkpoints/grpo_step_0025.pt
+
+[step 0026] SKIP rewards=[1,1] rollout=98s elapsed=3778s
+[step 0027] SKIP rewards=[0,0] rollout=99s elapsed=3878s
+[step 0028] SKIP rewards=[0,0] rollout=96s elapsed=3974s
+[step 0029] SKIP rewards=[1,1] rollout=85s elapsed=4059s
+[step 0030] SKIP rewards=[0,0] rollout=72s elapsed=4131s
+  Checkpoint saved: checkpoints/grpo_step_0030.pt
+[step 0031] SKIP rewards=[1,1] rollout=101s elapsed=4232s
+[step 0032] SKIP rewards=[1,1] rollout=89s elapsed=4320s
+[step 0033] SKIP rewards=[1,1] rollout=83s elapsed=4403s
+[step 0034] SKIP rewards=[1,1] rollout=92s elapsed=4495s
+[step 0035] SKIP rewards=[1,1] rollout=112s elapsed=4607s
+[step 0036] SKIP rewards=[1,1] rollout=109s elapsed=4716s
+[step 0037] SKIP rewards=[0,0] rollout=108s elapsed=4823s
+[step 0038] rewards=[0,1] loss=3.3791 kl=0.1478 |scale|=0.0243 |grad|=6.25e-05 lr=0.0099 rollout=145s update=190.6s total=335s running_r=0.85
+[step 0039] SKIP rewards=[1,1] rollout=106s elapsed=5265s
+[step 0040] rewards=[0,1] loss=1.5521 kl=-0.1883 |scale|=0.0262 |grad|=6.58e-05 lr=0.0099 rollout=160s update=202.9s total=363s running_r=0.85
+  Checkpoint saved: checkpoints/grpo_step_0040.pt
+[step 0041] SKIP rewards=[0,0] rollout=132s elapsed=5760s
+[step 0042] SKIP rewards=[0,0] rollout=107s elapsed=5867s
+[step 0043] SKIP rewards=[0,0] rollout=155s elapsed=6022s
+[step 0044] rewards=[1,0] loss=0.2415 kl=0.0896 |scale|=0.0280 |grad|=6.35e-05 lr=0.0098 rollout=132s update=169.4s total=301s running_r=0.83
+[step 0045] SKIP rewards=[1,1] rollout=130s elapsed=6453s
+[step 0046] SKIP rewards=[1,1] rollout=100s elapsed=6553s
+[step 0047] SKIP rewards=[1,1] rollout=86s elapsed=6639s
+[step 0048] SKIP rewards=[1,1] rollout=93s elapsed=6732s
+[step 0049] SKIP rewards=[1,1] rollout=99s elapsed=6831s
+[step 0050] SKIP rewards=[0,0] rollout=165s elapsed=6996s
+  Checkpoint saved: checkpoints/grpo_step_0050.pt
+
+[EVAL] Step 50...
+  eval [1/20] pred=18 gt=18 OK
+  eval [2/20] pred=3 gt=3 OK
+  eval [3/20] pred=120000 gt=70000 WRONG
+  eval [4/20] pred=540 gt=540 OK
+  eval [5/20] pred=2 gt=20 WRONG
+  eval [6/20] pred=60 gt=64 WRONG
+  eval [7/20] pred=260 gt=260 OK
+  eval [8/20] pred=60 gt=160 WRONG
+  eval [9/20] pred=315 gt=45 WRONG
+  eval [10/20] pred=460 gt=460 OK
+  eval [11/20] pred=366 gt=366 OK
+  eval [12/20] pred=694 gt=694 OK
+  eval [13/20] pred=12 gt=13 WRONG
+  eval [14/20] pred=18 gt=18 OK
+  eval [15/20] pred=12 gt=60 WRONG
+  eval [16/20] pred=221 gt=125 WRONG
+  eval [17/20] pred=230 gt=230 OK
+  eval [18/20] pred=1450 gt=57500 WRONG
+  eval [19/20] pred=7 gt=7 OK
+  eval [20/20] pred=4 gt=6 WRONG
+  Accuracy: 50.0% (base: 50.0%) [1225s]
+  Checkpoint saved: checkpoints/grpo_step_0050.pt
+
+[step 0051] rewards=[0,1] loss=23.9472 kl=0.2537 |scale|=0.0295 |grad|=1.29e-04 lr=0.0098 rollout=208s update=214.0s total=422s running_r=0.84
+[step 0052] SKIP rewards=[0,0] rollout=151s elapsed=7569s
+[step 0053] SKIP rewards=[1,1] rollout=127s elapsed=7696s
+[step 0054] SKIP rewards=[1,1] rollout=85s elapsed=7780s
+[step 0055] rewards=[0,1] loss=4.7997 kl=-0.1059 |scale|=0.0308 |grad|=6.54e-05 lr=0.0097 rollout=153s update=187.1s total=340s running_r=0.84
+[step 0056] SKIP rewards=[1,1] rollout=125s elapsed=8246s
+[step 0057] SKIP rewards=[1,1] rollout=82s elapsed=8328s
+[step 0058] SKIP rewards=[1,1] rollout=109s elapsed=8438s
+[step 0059] SKIP rewards=[1,1] rollout=82s elapsed=8520s
+[step 0060] SKIP rewards=[0,0] rollout=102s elapsed=8622s
+  Checkpoint saved: checkpoints/grpo_step_0060.pt
+[step 0061] SKIP rewards=[1,1] rollout=90s elapsed=8712s
+[step 0062] SKIP rewards=[0,0] rollout=106s elapsed=8818s
+[step 0063] rewards=[0,1] loss=0.6963 kl=0.1138 |scale|=0.0321 |grad|=7.56e-05 lr=0.0097 rollout=130s update=175.4s total=305s running_r=0.85
+[step 0064] SKIP rewards=[1,1] rollout=159s elapsed=9283s
+[step 0065] SKIP rewards=[0,0] rollout=162s elapsed=9445s
+[step 0066] rewards=[0,1] loss=1.1528 kl=-0.0977 |scale|=0.0334 |grad|=1.05e-04 lr=0.0096 rollout=159s update=193.9s total=353s running_r=0.85
+[step 0067] SKIP rewards=[1,1] rollout=128s elapsed=9925s
+[step 0068] SKIP rewards=[1,1] rollout=99s elapsed=10024s
+[step 0069] SKIP rewards=[1,1] rollout=116s elapsed=10141s
+[step 0070] SKIP rewards=[1,1] rollout=115s elapsed=10255s
+  Checkpoint saved: checkpoints/grpo_step_0070.pt
+[step 0071] SKIP rewards=[1,1] rollout=126s elapsed=10381s
+[step 0072] SKIP rewards=[0,0] rollout=99s elapsed=10481s
+[step 0073] SKIP rewards=[1,1] rollout=120s elapsed=10601s
+[step 0074] SKIP rewards=[0,0] rollout=127s elapsed=10728s
+[step 0075] SKIP rewards=[0,0] rollout=84s elapsed=10812s
+
+[EVAL] Step 75...
+  eval [1/20] pred=18 gt=18 OK
+  eval [2/20] pred=3 gt=3 OK
+  eval [3/20] pred=70000 gt=70000 OK
+  eval [4/20] pred=540 gt=540 OK
+  eval [5/20] pred=2 gt=20 WRONG
+  eval [6/20] pred=60 gt=64 WRONG
+  eval [7/20] pred=260 gt=260 OK
+  eval [8/20] pred=60 gt=160 WRONG
+  eval [9/20] pred=311 gt=45 WRONG
+  eval [10/20] pred=460 gt=460 OK
+  eval [11/20] pred=366 gt=366 OK
+  eval [12/20] pred=694 gt=694 OK
+  eval [13/20] pred=12 gt=13 WRONG
+  eval [14/20] pred=18 gt=18 OK
+  eval [15/20] pred=12 gt=60 WRONG
+  eval [16/20] pred=221 gt=125 WRONG
+  eval [17/20] pred=160 gt=230 WRONG
+  eval [18/20] pred=1450 gt=57500 WRONG
+  eval [19/20] pred=7 gt=7 OK
+  eval [20/20] pred=4 gt=6 WRONG
+  Accuracy: 50.0% (base: 50.0%) [1216s]
+  Checkpoint saved: checkpoints/grpo_step_0075.pt
+
+[step 0076] SKIP rewards=[1,1] rollout=85s elapsed=10897s
+[step 0077] rewards=[1,0] loss=-3.9683 kl=-0.2103 |scale|=0.0347 |grad|=6.42e-05 lr=0.0095 rollout=128s update=163.2s total=292s running_r=0.85
+[step 0078] SKIP rewards=[1,1] rollout=133s elapsed=11322s
+[step 0079] SKIP rewards=[1,1] rollout=147s elapsed=11470s
+[step 0080] SKIP rewards=[1,1] rollout=99s elapsed=11569s
+  Checkpoint saved: checkpoints/grpo_step_0080.pt
+[step 0081] SKIP rewards=[0,0] rollout=130s elapsed=11699s
+[step 0082] SKIP rewards=[1,1] rollout=91s elapsed=11790s
+[step 0083] SKIP rewards=[0,0] rollout=136s elapsed=11926s
+[step 0084] SKIP rewards=[0,0] rollout=92s elapsed=12019s
+[step 0085] SKIP rewards=[0,0] rollout=158s elapsed=12176s
+[step 0086] SKIP rewards=[0,0] rollout=127s elapsed=12303s
+[step 0087] SKIP rewards=[1,1] rollout=84s elapsed=12388s
+[step 0088] SKIP rewards=[1,1] rollout=95s elapsed=12483s
+[step 0089] SKIP rewards=[1,1] rollout=134s elapsed=12617s
+[step 0090] SKIP rewards=[1,1] rollout=113s elapsed=12730s
+  Checkpoint saved: checkpoints/grpo_step_0090.pt
+[step 0091] rewards=[0,1] loss=-2.1094 kl=0.3238 |scale|=0.0360 |grad|=7.34e-05 lr=0.0093 rollout=110s update=154.3s total=265s running_r=0.85
+[step 0092] SKIP rewards=[1,1] rollout=99s elapsed=13094s
+[step 0093] SKIP rewards=[1,1] rollout=184s elapsed=13278s
+[step 0094] SKIP rewards=[0,0] rollout=112s elapsed=13390s
+[step 0095] SKIP rewards=[1,1] rollout=102s elapsed=13492s
+[step 0096] SKIP rewards=[1,1] rollout=144s elapsed=13636s
+[step 0097] SKIP rewards=[1,1] rollout=115s elapsed=13750s
+[step 0098] SKIP rewards=[1,1] rollout=84s elapsed=13835s
+[step 0099] rewards=[0,1] loss=4.1866 kl=0.0338 |scale|=0.0372 |grad|=7.71e-05 lr=0.0092 rollout=156s update=193.6s total=350s running_r=0.85
+[step 0100] SKIP rewards=[1,1] rollout=116s elapsed=14300s
+  Checkpoint saved: checkpoints/grpo_step_0100.pt
+
+[EVAL] Step 100...
+  eval [1/20] pred=26 gt=18 WRONG
+  eval [2/20] pred=3 gt=3 OK
+  eval [3/20] pred=40000 gt=70000 WRONG
+  eval [4/20] pred=540 gt=540 OK
+  eval [5/20] pred=0 gt=20 WRONG
+  eval [6/20] pred=80 gt=64 WRONG
+  eval [7/20] pred=260 gt=260 OK
+  eval [8/20] pred=60 gt=160 WRONG
+  eval [9/20] pred=75 gt=45 WRONG
+  eval [10/20] pred=460 gt=460 OK
+  eval [11/20] pred=366 gt=366 OK
+  eval [12/20] pred=694 gt=694 OK
+  eval [13/20] pred=12 gt=13 WRONG
+  eval [14/20] pred=18 gt=18 OK
+  eval [15/20] pred=12 gt=60 WRONG
+  eval [16/20] pred=221 gt=125 WRONG
+  eval [17/20] pred=160 gt=230 WRONG
+  eval [18/20] pred=1450 gt=57500 WRONG
+  eval [19/20] pred=7 gt=7 OK
+  eval [20/20] pred=4 gt=6 WRONG
+  Accuracy: 40.0% (base: 50.0%) [1187s]
+  Checkpoint saved: checkpoints/grpo_step_0100.pt
+
+[step 0101] SKIP rewards=[1,1] rollout=140s elapsed=14440s
+[step 0102] SKIP rewards=[1,1] rollout=144s elapsed=14584s
+[step 0103] rewards=[0,1] loss=-4.0667 kl=0.4574 |scale|=0.0386 |grad|=6.88e-05 lr=0.0091 rollout=118s update=147.4s total=265s running_r=0.86
+[step 0104] SKIP rewards=[0,0] rollout=105s elapsed=14955s
+[step 0105] SKIP rewards=[1,1] rollout=109s elapsed=15064s
+[step 0106] SKIP rewards=[1,1] rollout=93s elapsed=15157s
+[step 0107] rewards=[1,0] loss=4.9066 kl=-0.1288 |scale|=0.0399 |grad|=6.32e-05 lr=0.0090 rollout=93s update=131.7s total=225s running_r=0.86
+[step 0108] SKIP rewards=[1,1] rollout=77s elapsed=15459s
+[step 0109] SKIP rewards=[1,1] rollout=79s elapsed=15538s
+[step 0110] SKIP rewards=[1,1] rollout=129s elapsed=15667s
+  Checkpoint saved: checkpoints/grpo_step_0110.pt
+[step 0111] SKIP rewards=[1,1] rollout=75s elapsed=15742s
+[step 0112] SKIP rewards=[1,1] rollout=100s elapsed=15842s
+[step 0113] SKIP rewards=[1,1] rollout=110s elapsed=15953s
+[step 0114] SKIP rewards=[1,1] rollout=84s elapsed=16036s
+[step 0115] SKIP rewards=[1,1] rollout=117s elapsed=16153s
+[step 0116] SKIP rewards=[1,1] rollout=89s elapsed=16242s
+[step 0117] SKIP rewards=[1,1] rollout=80s elapsed=16322s
+[step 0118] SKIP rewards=[0,0] rollout=125s elapsed=16447s
+[step 0119] SKIP rewards=[1,1] rollout=91s elapsed=16539s
+[step 0120] SKIP rewards=[1,1] rollout=80s elapsed=16619s
+  Checkpoint saved: checkpoints/grpo_step_0120.pt
+[step 0121] SKIP rewards=[0,0] rollout=104s elapsed=16722s
+[step 0122] rewards=[1,0] loss=0.6967 kl=0.4116 |scale|=0.0410 |grad|=5.19e-05 lr=0.0087 rollout=117s update=142.3s total=259s running_r=0.87
+[step 0123] SKIP rewards=[1,1] rollout=68s elapsed=17050s
+[step 0124] SKIP rewards=[0,0] rollout=118s elapsed=17168s
+[step 0125] SKIP rewards=[0,0] rollout=105s elapsed=17273s
+
+[EVAL] Step 125...
+  eval [1/20] pred=18 gt=18 OK
+  eval [2/20] pred=3 gt=3 OK
+  eval [3/20] pred=40000 gt=70000 WRONG
+  eval [4/20] pred=540 gt=540 OK
+  eval [5/20] pred=2 gt=20 WRONG
+  eval [6/20] pred=60 gt=64 WRONG
+  eval [7/20] pred=260 gt=260 OK
+  eval [8/20] pred=100 gt=160 WRONG
+  eval [9/20] pred=311 gt=45 WRONG
+  eval [10/20] pred=460 gt=460 OK
+  eval [11/20] pred=366 gt=366 OK
+  eval [12/20] pred=694 gt=694 OK
+  eval [13/20] pred=12 gt=13 WRONG
+  eval [14/20] pred=18 gt=18 OK
+  eval [15/20] pred=12 gt=60 WRONG
+  eval [16/20] pred=221 gt=125 WRONG
+  eval [17/20] pred=230 gt=230 OK
+  eval [18/20] pred=1450 gt=57500 WRONG
+  eval [19/20] pred=7 gt=7 OK
+  eval [20/20] pred=4 gt=6 WRONG
+  Accuracy: 50.0% (base: 50.0%) [1115s]
+  Checkpoint saved: checkpoints/grpo_step_0125.pt
+
+[step 0126] SKIP rewards=[0,0] rollout=157s elapsed=17430s
+[step 0127] SKIP rewards=[1,1] rollout=130s elapsed=17561s
+[step 0128] rewards=[0,1] loss=6.3365 kl=-0.3759 |scale|=0.0420 |grad|=6.86e-05 lr=0.0086 rollout=119s update=141.8s total=260s running_r=0.86
+[step 0129] SKIP rewards=[1,1] rollout=70s elapsed=17891s
+[step 0130] SKIP rewards=[1,1] rollout=75s elapsed=17966s
+  Checkpoint saved: checkpoints/grpo_step_0130.pt
+[step 0131] SKIP rewards=[1,1] rollout=99s elapsed=18066s
+[step 0132] SKIP rewards=[1,1] rollout=91s elapsed=18156s
+[step 0133] SKIP rewards=[1,1] rollout=83s elapsed=18239s
+[step 0134] SKIP rewards=[1,1] rollout=74s elapsed=18313s
+[step 0135] SKIP rewards=[1,1] rollout=101s elapsed=18414s
+[step 0136] SKIP rewards=[0,0] rollout=73s elapsed=18487s
+[step 0137] rewards=[0,1] loss=-11.1816 kl=-0.2276 |scale|=0.0429 |grad|=9.54e-05 lr=0.0084 rollout=172s update=170.8s total=343s running_r=0.87
+[step 0138] SKIP rewards=[0,0] rollout=110s elapsed=18940s
+[step 0139] SKIP rewards=[1,1] rollout=91s elapsed=19030s
+[step 0140] SKIP rewards=[1,1] rollout=133s elapsed=19163s
+  Checkpoint saved: checkpoints/grpo_step_0140.pt
+[step 0141] rewards=[0,1] loss=2.5306 kl=-0.3330 |scale|=0.0437 |grad|=7.31e-05 lr=0.0083 rollout=143s update=180.3s total=324s running_r=0.87
+[step 0142] SKIP rewards=[0,0] rollout=94s elapsed=19581s
+[step 0143] rewards=[0,1] loss=-0.0339 kl=0.1503 |scale|=0.0444 |grad|=5.76e-05 lr=0.0083 rollout=117s update=134.0s total=251s running_r=0.86
+[step 0144] SKIP rewards=[1,1] rollout=99s elapsed=19931s
+[step 0145] SKIP rewards=[1,1] rollout=86s elapsed=20017s
+[step 0146] SKIP rewards=[0,0] rollout=135s elapsed=20152s
+[step 0147] SKIP rewards=[0,0] rollout=160s elapsed=20312s
+[step 0148] rewards=[1,0] loss=0.5037 kl=0.4754 |scale|=0.0451 |grad|=6.83e-05 lr=0.0082 rollout=124s update=141.6s total=265s running_r=0.86
+[step 0149] rewards=[1,0] loss=-1.6319 kl=-0.0685 |scale|=0.0457 |grad|=4.58e-05 lr=0.0082 rollout=80s update=113.9s total=194s running_r=0.86
+[step 0150] rewards=[1,0] loss=9.9383 kl=-0.2190 |scale|=0.0464 |grad|=7.10e-05 lr=0.0081 rollout=114s update=132.4s total=246s running_r=0.86
+  Checkpoint saved: checkpoints/grpo_step_0150.pt
+
+[EVAL] Step 150...
+  eval [1/20] pred=18 gt=18 OK
+  eval [2/20] pred=3 gt=3 OK
+  eval [3/20] pred=40000 gt=70000 WRONG
+  eval [4/20] pred=540 gt=540 OK
+  eval [5/20] pred=2 gt=20 WRONG
+  eval [6/20] pred=80 gt=64 WRONG
+  eval [7/20] pred=260 gt=260 OK
+  eval [8/20] pred=60 gt=160 WRONG
+  eval [9/20] pred=75 gt=45 WRONG
+  eval [10/20] pred=460 gt=460 OK
+  eval [11/20] pred=366 gt=366 OK
+  eval [12/20] pred=694 gt=694 OK
+  eval [13/20] pred=12 gt=13 WRONG
+  eval [14/20] pred=18 gt=18 OK
+  eval [15/20] pred=60 gt=60 OK
+  eval [16/20] pred=221 gt=125 WRONG
+  eval [17/20] pred=160 gt=230 WRONG
+  eval [18/20] pred=1450 gt=57500 WRONG
+  eval [19/20] pred=7 gt=7 OK
+  eval [20/20] pred=4 gt=6 WRONG
+  Accuracy: 50.0% (base: 50.0%) [1021s]
+  Checkpoint saved: checkpoints/grpo_step_0150.pt
+
+[step 0151] SKIP rewards=[1,1] rollout=81s elapsed=21098s
+[step 0152] SKIP rewards=[0,0] rollout=114s elapsed=21212s
+[step 0153] SKIP rewards=[1,1] rollout=85s elapsed=21297s
+[step 0154] SKIP rewards=[0,0] rollout=151s elapsed=21448s
+[step 0155] SKIP rewards=[1,1] rollout=104s elapsed=21553s
+[step 0156] SKIP rewards=[1,1] rollout=105s elapsed=21658s
+[step 0157] rewards=[1,0] loss=-2.4572 kl=0.0005 |scale|=0.0472 |grad|=7.97e-05 lr=0.0080 rollout=91s update=119.2s total=210s running_r=0.86
+[step 0158] rewards=[1,0] loss=3.2794 kl=-0.1530 |scale|=0.0480 |grad|=5.62e-05 lr=0.0080 rollout=123s update=134.7s total=257s running_r=0.86
+[step 0159] SKIP rewards=[0,0] rollout=100s elapsed=22226s
+[step 0160] SKIP rewards=[1,1] rollout=96s elapsed=22321s
+  Checkpoint saved: checkpoints/grpo_step_0160.pt
+[step 0161] rewards=[1,0] loss=0.6055 kl=-0.4312 |scale|=0.0486 |grad|=6.14e-05 lr=0.0079 rollout=108s update=128.3s total=236s running_r=0.86
+[step 0162] SKIP rewards=[1,1] rollout=110s elapsed=22667s
+[step 0163] rewards=[0,1] loss=-1.0774 kl=0.2979 |scale|=0.0492 |grad|=6.08e-05 lr=0.0078 rollout=82s update=115.5s total=198s running_r=0.86
+[step 0164] rewards=[0,1] loss=-0.5094 kl=-0.1223 |scale|=0.0498 |grad|=3.13e-05 lr=0.0078 rollout=62s update=102.2s total=165s running_r=0.86
+[step 0165] rewards=[0,1] loss=-4.7402 kl=0.5441 |scale|=0.0503 |grad|=1.33e-04 lr=0.0078 rollout=161s update=169.2s total=330s running_r=0.86
+[step 0166] SKIP rewards=[1,1] rollout=96s elapsed=23456s
+[step 0167] rewards=[0,1] loss=7.3796 kl=-0.1174 |scale|=0.0510 |grad|=6.07e-05 lr=0.0077 rollout=95s update=115.1s total=210s running_r=0.86
+[step 0168] SKIP rewards=[1,1] rollout=81s elapsed=23747s
+[step 0169] SKIP rewards=[1,1] rollout=72s elapsed=23819s
+[step 0170] SKIP rewards=[1,1] rollout=102s elapsed=23921s
+  Checkpoint saved: checkpoints/grpo_step_0170.pt
+[step 0171] rewards=[0,1] loss=1.8614 kl=-0.2083 |scale|=0.0516 |grad|=8.93e-05 lr=0.0076 rollout=65s update=102.2s total=167s running_r=0.86
+[step 0172] SKIP rewards=[1,1] rollout=72s elapsed=24160s
+[step 0173] rewards=[0,1] loss=-0.5092 kl=0.4548 |scale|=0.0522 |grad|=9.78e-05 lr=0.0076 rollout=155s update=171.7s total=326s running_r=0.86
+[step 0174] SKIP rewards=[1,1] rollout=106s elapsed=24593s
+[step 0175] SKIP rewards=[0,0] rollout=90s elapsed=24683s
+
+[EVAL] Step 175...
+  eval [1/20] pred=18 gt=18 OK
+  eval [2/20] pred=3 gt=3 OK
+  eval [3/20] pred=40000 gt=70000 WRONG
+  eval [4/20] pred=540 gt=540 OK
+  eval [5/20] pred=2 gt=20 WRONG
+  eval [6/20] pred=60 gt=64 WRONG
+  eval [7/20] pred=260 gt=260 OK
+  eval [8/20] pred=60 gt=160 WRONG
+  eval [9/20] pred=315 gt=45 WRONG
+  eval [10/20] pred=460 gt=460 OK
+  eval [11/20] pred=366 gt=366 OK
+  eval [12/20] pred=694 gt=694 OK
+  eval [13/20] pred=12 gt=13 WRONG
+  eval [14/20] pred=18 gt=18 OK
+  eval [15/20] pred=12 gt=60 WRONG
+  eval [16/20] pred=221 gt=125 WRONG
+  eval [17/20] pred=160 gt=230 WRONG
+  eval [18/20] pred=1450 gt=57500 WRONG
+  eval [19/20] pred=7 gt=7 OK
+  eval [20/20] pred=4 gt=6 WRONG
+  Accuracy: 45.0% (base: 50.0%) [1020s]
+  Checkpoint saved: checkpoints/grpo_step_0175.pt
+
+[step 0176] SKIP rewards=[1,1] rollout=104s elapsed=24787s
+[step 0177] SKIP rewards=[1,1] rollout=137s elapsed=24924s
+[step 0178] SKIP rewards=[0,0] rollout=153s elapsed=25077s
+[step 0179] SKIP rewards=[1,1] rollout=94s elapsed=25171s
+[step 0180] SKIP rewards=[1,1] rollout=88s elapsed=25260s
+  Checkpoint saved: checkpoints/grpo_step_0180.pt
+[step 0181] SKIP rewards=[1,1] rollout=66s elapsed=25325s
+[step 0182] rewards=[1,0] loss=2.1290 kl=-0.0410 |scale|=0.0527 |grad|=1.01e-04 lr=0.0074 rollout=159s update=171.2s total=330s running_r=0.86
+[step 0183] rewards=[1,0] loss=-0.0887 kl=0.0696 |scale|=0.0532 |grad|=4.40e-05 lr=0.0073 rollout=77s update=103.0s total=180s running_r=0.86
+[step 0184] rewards=[1,0] loss=-1.4804 kl=-0.1107 |scale|=0.0537 |grad|=5.37e-05 lr=0.0073 rollout=110s update=131.8s total=242s running_r=0.86
+[step 0185] SKIP rewards=[1,1] rollout=100s elapsed=26177s
+[step 0186] SKIP rewards=[1,1] rollout=76s elapsed=26253s
+[step 0187] SKIP rewards=[0,0] rollout=152s elapsed=26405s
+[step 0188] rewards=[0,1] loss=-8.8736 kl=0.1045 |scale|=0.0542 |grad|=6.65e-05 lr=0.0072 rollout=138s update=161.8s total=300s running_r=0.86
+[step 0189] SKIP rewards=[1,1] rollout=77s elapsed=26781s
+[step 0190] SKIP rewards=[1,1] rollout=106s elapsed=26888s
+  Checkpoint saved: checkpoints/grpo_step_0190.pt
+[step 0191] SKIP rewards=[0,0] rollout=76s elapsed=26964s
+[step 0192] SKIP rewards=[0,0] rollout=116s elapsed=27080s
+[step 0193] SKIP rewards=[1,1] rollout=79s elapsed=27159s
+[step 0194] SKIP rewards=[1,1] rollout=87s elapsed=27247s
+[step 0195] SKIP rewards=[1,1] rollout=85s elapsed=27332s
+[step 0196] SKIP rewards=[0,0] rollout=118s elapsed=27450s
+[step 0197] SKIP rewards=[1,1] rollout=101s elapsed=27551s
+[step 0198] SKIP rewards=[1,1] rollout=155s elapsed=27706s
+[step 0199] SKIP rewards=[1,1] rollout=128s elapsed=27834s
+[step 0200] rewards=[0,1] loss=2.1820 kl=0.0500 |scale|=0.0546 |grad|=5.74e-05 lr=0.0069 rollout=136s update=191.6s total=327s running_r=0.86
+  Checkpoint saved: checkpoints/grpo_step_0200.pt
+
+[EVAL] Step 200...
+  eval [1/20] pred=18 gt=18 OK
+  eval [2/20] pred=3 gt=3 OK
+  eval [3/20] pred=40000 gt=70000 WRONG
+  eval [4/20] pred=540 gt=540 OK
+  eval [5/20] pred=2 gt=20 WRONG
+  eval [6/20] pred=60 gt=64 WRONG
+  eval [7/20] pred=260 gt=260 OK
+  eval [8/20] pred=60 gt=160 WRONG
+  eval [9/20] pred=311 gt=45 WRONG
+  eval [10/20] pred=460 gt=460 OK
+  eval [11/20] pred=366 gt=366 OK
+  eval [12/20] pred=694 gt=694 OK
+  eval [13/20] pred=12 gt=13 WRONG
+  eval [14/20] pred=18 gt=18 OK
+  eval [15/20] pred=60 gt=60 OK
+  eval [16/20] pred=221 gt=125 WRONG
+  eval [17/20] pred=160 gt=230 WRONG
+  eval [18/20] pred=1450 gt=57500 WRONG
+  eval [19/20] pred=7 gt=7 OK
+  eval [20/20] pred=4 gt=6 WRONG
+  Accuracy: 50.0% (base: 50.0%) [1271s]
+  Checkpoint saved: checkpoints/grpo_step_0200.pt
+
+[step 0201] SKIP rewards=[0,0] rollout=103s elapsed=28265s
