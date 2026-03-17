@@ -39,7 +39,7 @@ GROUP_SIZE = 4  # G: completions per prompt
 TEMPERATURE = 0.7  # sampling temperature for rollouts
 TOP_P = 0.9  # nucleus sampling threshold
 MAX_NEW_TOKENS = 128  # tokens per completion
-BETA_KL = 0.01  # KL divergence penalty weight
+BETA_KL = 0.0   # GhostWeight: π_ref is random noise; KL penalty would fight learning
 LEARNING_RATE = 0.01  # initial Adam learning rate
 LR_MIN = 0.001  # final learning rate (cosine decay)
 ADAM_BETAS = (0.9, 0.999)  # Adam beta1, beta2
@@ -438,20 +438,7 @@ def grpo_step(
         if answers_match(pred, ground_truth):
             reward = 1.0
         else:
-            # Partial format rewards to create variance for untrained model:
-            # +0.3 if any number appears in output (model produces numeric tokens)
-            # +0.2 if "answer is" phrase present
-            # +0.1 if output is non-empty and non-repetitive
-            import re as _re
-
-            r = 0.0
-            if len(comp_text.strip()) > 5:
-                r += 0.1
-            if _re.search(r"\d+", comp_text):
-                r += 0.3
-            if _re.search(r"answer is", comp_text, _re.IGNORECASE):
-                r += 0.2
-            reward = r
+            reward = 0.0  # Binary reward: correct or nothing. No partial rewards.
         rewards.append(reward)
 
     # 3. ADVANTAGE: Group-normalize rewards
@@ -628,6 +615,8 @@ def save_checkpoint(adapters, optimizer, step, eval_history, config):
             "optimizer_state": optimizer.state_dict(),
             "eval_history": eval_history,
             "config": config,
+            "use_ghost": USE_GHOST,
+            "ghost_seed": GHOST_SEED if USE_GHOST else None,
         },
         path,
     )
