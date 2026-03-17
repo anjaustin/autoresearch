@@ -53,7 +53,7 @@ CHECKPOINT_EVERY = 10  # save checkpoint every N steps
 NUM_FEW_SHOT = 2  # few-shot examples in prompt
 
 # GhostWeight: use PRNG-generated weights (no storage, ~1KB model)
-USE_GHOST = False  # Use real BitNet weights; GhostWeight needs fresh run
+USE_GHOST = True  # GhostWeight: PRNG weights (8 bytes) + TinyLoRA (1KB) = unified model
 GHOST_SEED = 42  # PRNG seed for deterministic weight regeneration
 
 # Seed
