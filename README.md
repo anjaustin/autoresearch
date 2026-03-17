@@ -1,20 +1,114 @@
-# GhostWeight: The 1KB LLM
-## TinyLoRA + RL on BitNet b1.58
+# Project GhostWeight: The 1KB LLM
+## TinyLoRA + GRPO on BitNet b1.58 — CPU-Only, AVX2
 
-> **Fork status:** This fork has diverged from the upstream [karpathy/autoresearch](https://github.com/karpathy/autoresearch). It focuses on **Project GhostWeight**: achieving maximum LLM compression by replacing frozen ternary weights with deterministic PRNG generators and steering them with 1KB of TinyLoRA adapters trained via GRPO.
-
-**Target model:** Microsoft BitNet b1.58 2B4T (natively ternary {-1,0,+1} weights)
-**Key results:** 
-- **500MB → 1KB Compression:** Entire 2.41B model weights collapsed to 8 bytes + 1KB adapters.
-- **3.1x Kernel Speedup:** Custom LUT-based ternary kernels (3.6ms/layer on CPU).
-- **38x Training Iteration Speedup:** Optimized backward pass and FP32 LM head.
-- **On-Policy RL:** First 1KB model recovery run achieving 91% running reward on GSM8K.
-
-See **[FINDINGS.md](FINDINGS.md)** for the full technical writeup and **[journal/](journal/)** for LMM analysis passes.
+> **Fork:** Diverged from [karpathy/autoresearch](https://github.com/karpathy/autoresearch). This project pursues **Project GhostWeight**: replacing a 500MB frozen LLM weight matrix with a deterministic 8-byte PRNG seed, then training a 1KB set of TinyLoRA adapters via GRPO to steer the resulting noise into coherent reasoning.
 
 ---
 
-*Original upstream README follows below.*
+## The Claim
+
+> A 2.41-billion parameter language model can reason using only **1KB of learned parameters**, if the 500MB weight matrix is replaced by a deterministic PRNG seeded with 8 bytes.
+
+The TinyLoRA adapter (210 scalar values = ~1KB) learns to compensate for the structured noise introduced by the PRNG, steering it toward correct answers on mathematical reasoning tasks (GSM8K).
+
+---
+
+## Key Results
+
+| Metric | Value |
+|---|---|
+| Model weights storage | **8 bytes** (PRNG seed) + **~1KB** (TinyLoRA adapters) |
+| Base model | Microsoft BitNet b1.58 2B4T (natively ternary {-1,0,+1}) |
+| Training task | GSM8K mathematical reasoning (GRPO, on-policy RL) |
+| Training hardware | AMD Ryzen 5 PRO 5675U — **CPU only**, no GPU |
+| Forward speedup vs stock PyTorch | **4.6x** (AVX2 LUT kernel, M=1) |
+| Backward speedup vs stock PyTorch | **75x** (ternary backward + FP32 LM head) |
+| GhostWeight kernel speedup | **3.1x** (LUT vs bit-manipulation, 3.6ms/layer) |
+| TinyLoRA parameters | **210** (1 scalar per AutoBitLinear layer) |
+| Running reward (TinyLoRA on real weights) | **~91%** at step 220 |
+
+---
+
+## Architecture
+
+```
+PRNG Seed (8 bytes)
+        │
+        ▼
+  SplitMix64 + XorShift128+
+        │ regenerate on-the-fly
+        ▼
+  Ternary weights {-1,0,+1} × weight_scale
+        │
+        ▼
+  AVX2 LUT Matmul (3.6ms/layer, 2MB lookup table)
+        │
+        ▼
+  TinyLoRA bypass: output += scale × (x @ v.T) @ u.T
+        │ (scale = 1 learned scalar per layer)
+        ▼
+  Final output → GRPO reward → gradient → scale update
+```
+
+**The key insight:** The TinyLoRA bypass path operates entirely in full precision on the input `x`, independent of whether the base weight matrix contains trained BitNet values or PRNG noise. The gradients flow through the bypass cleanly. The 210 scalar `scale` parameters are the only learned state.
+
+---
+
+## Unified Solution: One Run to Rule Them All
+
+Two intermediate solutions exist:
+1. **TinyLoRA on real BitNet weights** — works, 91% reward, but 500MB model.
+2. **GhostWeight kernel** — works as a kernel, but adapters must be trained against PRNG from step 0.
+
+**The unified solution:** Set `USE_GHOST=True` in `grpo_train.py` and run from step 0. Adapters and PRNG base train together. This is the finish line.
+
+```bash
+# Compile kernels
+gcc -O3 -mavx2 -mfma -march=native -fopenmp -shared -fPIC \
+    -o softchip/ternary_matmul_v3.so softchip/ternary_matmul_v3.c -lm
+gcc -O3 -mavx2 -mfma -shared -fPIC \
+    -o softchip/ghost_matmul.so softchip/ghost_matmul_lut.c
+
+# Run (USE_GHOST=True is set in grpo_train.py)
+nohup python -u grpo_train.py > grpo_ghost.log 2>&1 &
+
+# Resume after interruption
+nohup python -u grpo_train.py --resume=checkpoints/grpo_step_XXXX.pt \
+    >> grpo_ghost.log 2>&1 &
+```
+
+See **[FINDINGS.md](FINDINGS.md)** for the complete technical writeup, all LMM analysis passes, and reproduction instructions.
+
+---
+
+## Hardware
+
+- **CPU:** AMD Ryzen 5 PRO 5675U (6C/12T, Zen 3, AVX2+FMA)
+- **RAM:** 64GB DDR4-3200
+- **iGPU:** Vega 7 (Vulkan backend implemented; CPU AVX2 is faster for this workload)
+- **OS:** Linux, Python 3.13, PyTorch 2.10
+
+---
+
+## Project Structure
+
+```
+grpo_train.py               — GRPO training loop (TinyLoRA + GhostWeight)
+softchip/
+  torch_ternary.py          — PyTorch integration: patch_model(), GhostWeight
+  ternary_matmul_v3.c       — AVX2 ternary matmul (packed BitNet, forward+backward)
+  ghost_matmul_lut.c        — AVX2 GhostWeight LUT kernel (PRNG + M=4 unrolled)
+  ghost_matmul.c            — GhostWeight original kernel (reference)
+  mtp18_matmul.c            — MTP18 native base-3 kernel (experimental)
+  vk_backend.c              — Vulkan iGPU backend (implemented, not faster on Ryzen)
+checkpoints/                — GRPO adapter scale checkpoints
+journal/                    — LMM analysis passes (raw/nodes/reflect/synth)
+FINDINGS.md                 — Full technical writeup
+```
+
+---
+
+*Original upstream README follows.*
 
 ---
 

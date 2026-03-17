@@ -491,57 +491,103 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json ./softchip/vk_te
 
 ## Next Steps
 
-### Phase 1: GhostWeight Recovery (CURRENT)
-- Complete the 700-step GRPO run with GhostWeight (PRNG) enabled.
-- Verify that the 1KB model (seed + adapters) matches or exceeds the 500MB frozen model's performance.
-- Analyze the learned scales for GhostWeight vs. standard BitNet.
+### Phase 1: The Unified GhostWeight Run (CURRENT)
+- Run `grpo_train.py` with `USE_GHOST=True` from **step 0**. Adapters and PRNG base must train together.
+- Target: 700 steps, 8-hour sessions, resume via `--resume`.
+- Success criterion: GhostWeight model achieves >50% GSM8K accuracy on eval set.
 
-### Phase 2: Autoresearch Loop
+### Phase 2: Compression Verification
+- Compare 1KB GhostWeight model vs 500MB BitNet on full GSM8K test set (1319 problems).
+- Measure accuracy, rollout coherence, and adapter scale distribution.
+- If parity achieved: publish. If not: tune learning rate, group size, or adapter rank.
+
+### Phase 3: Autoresearch Loop
 - Build the autonomous experiment loop around the working GRPO inner loop.
 - Search space: layer subsets, adapter rank, learning rate, group size, temperature.
 - Optimize for maximum reward rate per CPU hour.
 
-### Phase 3: Hardware Portability
-- Port the LUT-optimized ternary kernels to CUDA (Jetson Thor) and Metal (Mac).
-- Benchmark the "1KB Model" across devices.
-- Explore MTP18 on hardware with native base-3 support (if available) or optimized SIMD.
+### Phase 4: Hardware Portability
+- Port the LUT-optimized kernels to CUDA (Jetson Thor) and Metal (Mac).
+- Benchmark the 1KB model across devices.
+- Explore MTP18 on hardware with native base-3 SIMD support.
 
 ## Reproduction
 
-```bash
-# Install dependencies
-pip install torch transformers peft trl accelerate datasets
+### Quick Start (Unified GhostWeight Run)
 
-# Download model
-huggingface-cli download microsoft/bitnet-b1.58-2B-4T-bf16 --local-dir models/bitnet-b1.58-2B-4T-bf16
+```bash
+# 1. Install dependencies
+pip install torch transformers datasets
+
+# 2. Download model (4.5 GB, BF16 master weights)
+huggingface-cli download microsoft/bitnet-b1.58-2B-4T-bf16 \
+    --local-dir models/bitnet-b1.58-2B-4T-bf16
 
 # Note: remove auto_map from config.json if using transformers >= 5.0
-# (BitNet is natively supported, custom code files not needed)
+# (BitNet is natively supported; custom code files not needed)
 
-# Run TinyLoRA validation
-python test_bitnet_tinylora.py
-
-# Run GRPO pre-flight or training
-python grpo_train.py --preflight
-python grpo_train.py
-
-# Build and benchmark soft-chip CPU kernel (requires AVX2)
+# 3. Compile soft-chip kernels (requires AVX2, gcc)
 gcc -O3 -mavx2 -mfma -march=native -fopenmp -shared -fPIC \
     -o softchip/ternary_matmul_v3.so softchip/ternary_matmul_v3.c -lm
-python test_softchip_accuracy.py    # Numerical validation
-python test_backward.py             # Backward kernel validation
-python test_lm_head_fp32.py         # FP32 LM head validation + full stack benchmark
-python profile_backward.py          # Backward pass profiling
-python bench_softchip_model.py      # Full model benchmark
 
-# Build and benchmark soft-chip GPU kernel (requires Vulkan + AMD iGPU)
+# 4. Compile GhostWeight LUT kernel
+gcc -O3 -mavx2 -mfma -shared -fPIC \
+    -o softchip/ghost_matmul.so softchip/ghost_matmul_lut.c
+
+# 5. (Optional) Validate kernels
+python test_softchip_accuracy.py
+python test_backward.py
+python softchip/test_ghost_kernel.py
+
+# 6. Pre-flight check
+python grpo_train.py --preflight
+
+# 7. Run the unified GhostWeight training (8-hour session)
+#    USE_GHOST=True is set in grpo_train.py
+nohup python -u grpo_train.py > grpo_ghost.log 2>&1 &
+
+# 8. Resume from checkpoint after interruption
+nohup python -u grpo_train.py --resume=checkpoints/grpo_step_XXXX.pt \
+    > grpo_ghost.log 2>&1 &
+
+# 9. Monitor training
+tail -f grpo_ghost.log
+```
+
+### Key configuration in `grpo_train.py`
+
+| Variable | Value | Notes |
+|---|---|---|
+| `USE_GHOST` | `True` | PRNG weights — must be True for 1KB model |
+| `GHOST_SEED` | `42` | Deterministic PRNG seed (8 bytes total weight storage) |
+| `GROUP_SIZE` | `4` | GRPO completions per prompt |
+| `MAX_NEW_TOKENS` | `128` | Token budget per completion |
+| `MAX_STEPS` | `700` | Training steps per session |
+| `TIME_BUDGET` | `28800` | 8 hours per session |
+
+### Important: GhostWeight must start from step 0
+
+Do **not** use a checkpoint trained with `USE_GHOST=False`. The adapter scales are calibrated
+to real BitNet weight activations — they are meaningless under PRNG weights. Always start
+a GhostWeight run fresh.
+
+### Benchmarks and Validation
+
+```bash
+# Full soft-chip CPU benchmark
+python bench_softchip_model.py
+
+# TinyLoRA validation (gradient flow through ternary model)
+python test_bitnet_tinylora.py
+
+# Checkpoint quick-eval
+python test_checkpoint.py checkpoints/grpo_step_XXXX.pt
+
+# Vulkan iGPU backend (requires AMD iGPU + RADV)
 sudo apt-get install libvulkan-dev glslang-tools mesa-vulkan-drivers
 glslangValidator -V softchip/ternary_matmul_v3.comp -o softchip/ternary_matmul_v3.spv
 gcc -O2 -shared -fPIC -o softchip/libvk_ternary.so softchip/vk_backend.c -lvulkan -lm -ldl
-VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json python softchip/test_vk_backend.py
 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json python test_vk_model.py
-VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json python bench_vk_model.py
-VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json python bench_vk_dispatch_overhead.py
 ```
 
 ## LMM Analysis
@@ -626,4 +672,14 @@ The pivot from LFM2-24B to BitNet b1.58 was driven by the REFLECT phase identify
 - **Benchmark:** Matmul speedup: 11.1ms → **3.6ms (3.1x faster)**.
 - **MTP18:** Explored native Multi-Trit Floating Point (MTP18) for native base-3 arithmetic. Found to be slower (66ms/layer) than ternary kernels on existing hardware.
 - **Result:** Training iteration recovered. 1KB model recovery now in progress with 91% running reward.
+
+### Pass 11: Unification — GhostWeight Must Start Fresh
+
+- **Discovery:** You cannot transfer TinyLoRA adapter scales trained against real BitNet weights to a GhostWeight (PRNG) base. The adapters at step 220 were calibrated to correct *trained* weight activations. Under PRNG noise they produce incoherent output (pred=None on all problems).
+- **Root cause:** Adapter scales of ~0.06 are tiny corrections designed to nudge specific activation patterns. If the activation patterns change completely (real → PRNG), the corrections are meaningless — equivalent to fine-tuning a correction layer on one piano and moving it to a different instrument.
+- **The unified architecture:** GhostWeight + TinyLoRA must be trained together from step 0. The adapters must learn to compensate for PRNG noise from the very first gradient update.
+- **Batching experiments:** Attempted M=4 batched rollouts. Found that batching increases attention cost (M × seq_len²) faster than it saves on weight regeneration. Sequential M=1 rollouts with a tighter token budget (128 vs 256) gave the best throughput: **~350s/step** (25% improvement).
+- **Stop condition fix:** `_should_stop` was firing on mid-sentence `Q:` tokens, collapsing generations to near-zero length. Fixed to require `\nQ:` (new-line prefix) before stopping.
+- **No re-eval on resume:** Eliminated the expensive 20-problem eval on every restart; `base_acc` is now recovered from checkpoint history.
+- **Decision:** Kill the intermediate USE_GHOST=False run. Launch a single clean `USE_GHOST=True` run from step 0. This is the finish line.
 
