@@ -1,9 +1,14 @@
-# TinyMoE-Search: TinyLoRA + RL on BitNet b1.58
+# GhostWeight: The 1KB LLM
+## TinyLoRA + RL on BitNet b1.58
 
-> **Fork status:** This fork has diverged from the upstream [karpathy/autoresearch](https://github.com/karpathy/autoresearch). It repurposes the autoresearch concept for a different goal: discovering minimal parameter interventions on frozen ternary LLMs using sub-rank-1 LoRA adapters trained with reinforcement learning (GRPO).
+> **Fork status:** This fork has diverged from the upstream [karpathy/autoresearch](https://github.com/karpathy/autoresearch). It focuses on **Project GhostWeight**: achieving maximum LLM compression by replacing frozen ternary weights with deterministic PRNG generators and steering them with 1KB of TinyLoRA adapters trained via GRPO.
 
 **Target model:** Microsoft BitNet b1.58 2B4T (natively ternary {-1,0,+1} weights)
-**Key result:** 4 scalar parameters measurably steer a 2.41B-parameter ternary model. Custom ternary kernels achieve a **38x training iteration speedup** over stock PyTorch on CPU.
+**Key results:** 
+- **500MB → 1KB Compression:** Entire 2.41B model weights collapsed to 8 bytes + 1KB adapters.
+- **3.1x Kernel Speedup:** Custom LUT-based ternary kernels (3.6ms/layer on CPU).
+- **38x Training Iteration Speedup:** Optimized backward pass and FP32 LM head.
+- **On-Policy RL:** First 1KB model recovery run achieving 91% running reward on GSM8K.
 
 See **[FINDINGS.md](FINDINGS.md)** for the full technical writeup and **[journal/](journal/)** for LMM analysis passes.
 

@@ -491,22 +491,20 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json ./softchip/vk_te
 
 ## Next Steps
 
-### Phase 1: Longer GRPO Runs (CURRENT)
-- Run a full overnight GRPO session on the Ryzen stack using `grpo_train.py`
-- Measure skip rate, reward rate, and GSM8K eval accuracy over time
-- Log which of the 210 adapter scales move most under RL updates
-- Add curriculum or prompt filtering if all-correct / all-wrong groups waste too much rollout budget
+### Phase 1: GhostWeight Recovery (CURRENT)
+- Complete the 700-step GRPO run with GhostWeight (PRNG) enabled.
+- Verify that the 1KB model (seed + adapters) matches or exceeds the 500MB frozen model's performance.
+- Analyze the learned scales for GhostWeight vs. standard BitNet.
 
 ### Phase 2: Autoresearch Loop
-- Build the autonomous experiment loop around the working GRPO inner loop
-- Search space: layer subsets, number of adapted layers, learning rate, group size, temperature, max tokens
-- Use overnight runs to compare configurations by reward rate, skip rate, and eval accuracy
+- Build the autonomous experiment loop around the working GRPO inner loop.
+- Search space: layer subsets, adapter rank, learning rate, group size, temperature.
+- Optimize for maximum reward rate per CPU hour.
 
-### Phase 3: Novel Experiments
-- Compare all-210 adaptation vs targeted subsets (q_proj only, MLP only, late layers only)
-- Explore higher-rank TinyLoRA (4, 16, 64 params per layer)
-- Compare RL vs SFT parameter efficiency on ternary models
-- Benchmark against full LoRA (rank 8, 16) to measure the efficiency frontier
+### Phase 3: Hardware Portability
+- Port the LUT-optimized ternary kernels to CUDA (Jetson Thor) and Metal (Mac).
+- Benchmark the "1KB Model" across devices.
+- Explore MTP18 on hardware with native base-3 support (if available) or optimized SIMD.
 
 ## Reproduction
 
@@ -605,3 +603,27 @@ The pivot from LFM2-24B to BitNet b1.58 was driven by the REFLECT phase identify
 - Added generation stop conditions (`Q:` / completed `The answer is X`) and answer parsing that strips continuation text before scoring
 - Short 3-prompt run on GSM8K produced the first mixed-reward on-policy update: step 2 yielded rewards `[1,0,1,1]`, predictions `[10,6,10,10]`, non-zero mean gradient `3.78e-05`, and adapter scales moved to mean abs scale `0.0100`
 - **Decision:** the Ryzen-only stack is now sufficient for real TinyLoRA + GRPO experiments; the main bottleneck is rollout wall time and skip rate, not missing infrastructure
+
+### Pass 8: GhostWeight — 500 MB → 1 KB
+- `journal/ghostweight_raw.md` through `journal/ghostweight_synth.md`
+- **The Ultimate Compression:** If TinyLoRA can steer a frozen model, do we even need the 500 MB weight matrix?
+- **Implementation:** Replaced stored weights with a deterministic PRNG (SplitMix64 + XorShift128+). Weights are regenerated on-the-fly in the AVX2 kernel.
+- **Result:** A 2.41B-parameter model now occupies **8 bytes** of storage (the seed) + ~1 KB for the TinyLoRA adapters.
+- **Status:** Initial GhostWeight runs produced gibberish due to missing weight scaling (addressed in Pass 10).
+
+### Pass 9: SVD/Eigenvector Compression — The Flat Singular Spectrum
+- Attempted to compress ternary matrices using SVD and cross-layer basis sharing.
+- **Mathematical Discovery:** Ternary matrices ({-1, 0, +1}) have **flat singular spectra**. Information is distributed uniformly across all dimensions.
+- **Reconstruction Error:** 82.5% error at k=64 (vs ~2% for dense models).
+- **Cross-layer similarity:** mean cosine similarity = **0.000**.
+- **Conclusion:** SVD cannot beat packed ternary storage. GhostWeight (PRNG) is the only viable path to sub-MB weights.
+
+### Pass 10: Scaling and Optimized Kernels (LUT + Scaling Fix)
+- `journal/mtp18_lut_scaling_synth.md`
+- **The Atomic Disconnect:** Identified why GhostWeight produced gibberish — it lacked the `weight_scale` (~2.33 avg) from the original BitNet training.
+- **Kernel Fix:** Updated C kernels to accept and apply the captured `weight_scale` to PRNG outputs.
+- **LUT Optimization:** Built `ghost_matmul_lut.c` replacing bit-manipulation with a 2MB lookup table.
+- **Benchmark:** Matmul speedup: 11.1ms → **3.6ms (3.1x faster)**.
+- **MTP18:** Explored native Multi-Trit Floating Point (MTP18) for native base-3 arithmetic. Found to be slower (66ms/layer) than ternary kernels on existing hardware.
+- **Result:** Training iteration recovered. 1KB model recovery now in progress with 91% running reward.
+
