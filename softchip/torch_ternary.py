@@ -203,6 +203,7 @@ def _ensure_ghost_lib():
         ctypes.c_int,
         ctypes.c_uint64,
         ctypes.c_int,
+        ctypes.c_float,
     ]
     _ghost_lib.ghost_matmul_backward.argtypes = [
         ctypes.POINTER(ctypes.c_float),
@@ -212,6 +213,7 @@ def _ensure_ghost_lib():
         ctypes.c_int,
         ctypes.c_uint64,
         ctypes.c_int,
+        ctypes.c_float,
     ]
     _ghost_lib.ghost_warm_cache.argtypes = [
         ctypes.c_int,
@@ -374,7 +376,9 @@ class GhostMatmulFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, base_seed, layer_id, in_features, out_features):
+    def forward(
+        ctx, input_tensor, base_seed, layer_id, in_features, out_features, weight_scale
+    ):
         lib = _ensure_ghost_lib()
 
         orig_shape = input_tensor.shape
@@ -395,6 +399,7 @@ class GhostMatmulFunction(torch.autograd.Function):
             out_features,
             ctypes.c_uint64(base_seed),
             ctypes.c_int(layer_id),
+            ctypes.c_float(weight_scale),
         )
 
         output = torch.from_numpy(out_f32).to(
@@ -407,6 +412,7 @@ class GhostMatmulFunction(torch.autograd.Function):
         ctx.layer_id = layer_id
         ctx.in_features = in_features
         ctx.out_features = out_features
+        ctx.weight_scale = weight_scale
         ctx.orig_shape = orig_shape
         return output
 
@@ -431,6 +437,7 @@ class GhostMatmulFunction(torch.autograd.Function):
             ctx.out_features,
             ctypes.c_uint64(ctx.base_seed),
             ctypes.c_int(ctx.layer_id),
+            ctypes.c_float(ctx.weight_scale),
         )
 
         grad_input = torch.from_numpy(gi_f32).to(
@@ -523,19 +530,23 @@ def patch_model(model, backend="auto", verbose=True, use_ghost=False, ghost_seed
                 continue
 
             out_features, in_features = module.weight.shape
+
+            # Capture original weight scale
+            weight_scale = module.weight.abs().mean().item()
+
             layer_id = count  # stable index across calls
 
             setattr(module, _PATCH_ATTR, module.forward)
             setattr(module, _BACKEND_ATTR, "ghost")
 
-            def make_ghost_forward(lid, K, N, seed):
+            def make_ghost_forward(lid, K, N, seed, scale):
                 def patched_forward(x):
-                    return GhostMatmulFunction.apply(x, seed, lid, K, N)
+                    return GhostMatmulFunction.apply(x, seed, lid, K, N, scale)
 
                 return patched_forward
 
             module.forward = make_ghost_forward(
-                layer_id, in_features, out_features, ghost_seed
+                layer_id, in_features, out_features, ghost_seed, weight_scale
             )
             count += 1
 

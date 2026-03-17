@@ -35,7 +35,7 @@ CHECKPOINT_DIR = "checkpoints"
 LOG_FILE = "grpo_log.jsonl"
 
 # GRPO hyperparameters
-GROUP_SIZE = 2  # G: completions per prompt
+GROUP_SIZE = 4  # G: completions per prompt
 TEMPERATURE = 0.7  # sampling temperature for rollouts
 TOP_P = 0.9  # nucleus sampling threshold
 MAX_NEW_TOKENS = 256  # max tokens per completion (reduced for GhostWeight speed)
@@ -45,7 +45,7 @@ LR_MIN = 0.001  # final learning rate (cosine decay)
 ADAM_BETAS = (0.9, 0.999)  # Adam beta1, beta2
 
 # Training schedule
-MAX_STEPS = 500  # maximum training steps
+MAX_STEPS = 700  # maximum training steps
 TIME_BUDGET = 28800  # 8 hours in seconds
 EVAL_EVERY = 25  # evaluate every N steps
 EVAL_SAMPLES = 20  # number of test problems for evaluation (reduced)
@@ -53,7 +53,7 @@ CHECKPOINT_EVERY = 10  # save checkpoint every N steps
 NUM_FEW_SHOT = 2  # few-shot examples in prompt
 
 # GhostWeight: use PRNG-generated weights (no storage, ~1KB model)
-USE_GHOST = False  # If True, use GhostWeight kernel (500MB -> 1KB)
+USE_GHOST = True  # If True, use GhostWeight kernel (500MB -> 1KB)
 GHOST_SEED = 42  # PRNG seed for deterministic weight regeneration
 
 # Seed
@@ -783,6 +783,10 @@ def preflight(model, tokenizer, adapters, train_data, test_data):
 
 def main():
     preflight_only = "--preflight" in sys.argv
+    resume_path = None
+    for arg in sys.argv[1:]:
+        if arg.startswith("--resume="):
+            resume_path = arg.split("=", 1)[1]
 
     print("=" * 60)
     print("  GRPO Training: TinyLoRA on BitNet b1.58 2B4T")
@@ -880,14 +884,29 @@ def main():
     steps_skipped = 0
     total_reward_sum = 0.0
     total_reward_count = 0
+    start_step = 1
+    base_acc = 0.0
 
-    # Base model evaluation (before training)
-    print("\n[EVAL] Base model accuracy (before training)...")
-    base_acc, base_results = evaluate(
-        model, tokenizer, test_data, num_samples=EVAL_SAMPLES
-    )
-    print(f"  Base accuracy: {base_acc * 100:.1f}% ({EVAL_SAMPLES} problems)")
-    eval_history.append({"step": 0, "accuracy": base_acc, "type": "base"})
+    # Resume from checkpoint if requested
+    if resume_path:
+        print(f"\n[RESUME] Loading checkpoint: {resume_path}")
+        start_step, eval_history = load_checkpoint(resume_path, adapters, optimizer)
+        start_step += 1  # continue from next step
+        train_idx = start_step % len(train_data)
+        print(
+            f"  Resuming from step {start_step}, eval_history={len(eval_history)} entries"
+        )
+        # Recalculate base_acc for evaluation comparison
+        base_acc, _ = evaluate(model, tokenizer, test_data, num_samples=EVAL_SAMPLES)
+        print(f"  Base accuracy: {base_acc * 100:.1f}% (recalculated)")
+    else:
+        # Base model evaluation (before training)
+        print("\n[EVAL] Base model accuracy (before training)...")
+        base_acc, base_results = evaluate(
+            model, tokenizer, test_data, num_samples=EVAL_SAMPLES
+        )
+        print(f"  Base accuracy: {base_acc * 100:.1f}% ({EVAL_SAMPLES} problems)")
+        eval_history.append({"step": 0, "accuracy": base_acc, "type": "base"})
 
     # Log file
     log_fh = open(LOG_FILE, "a")
@@ -900,7 +919,7 @@ def main():
 
     t_train_start = time.time()
 
-    for step in range(1, MAX_STEPS + 1):
+    for step in range(start_step, MAX_STEPS + 1):
         # Check time budget
         if total_training_time >= TIME_BUDGET:
             print(f"\nTime budget reached ({TIME_BUDGET}s). Stopping.")
