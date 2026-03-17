@@ -1,0 +1,104 @@
+The tokenizer you are loading from 'models/bitnet-b1.58-2B-4T-bf16' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+`torch_dtype` is deprecated! Use `dtype` instead!
+You don't have a GPU available to load the model, the inference will be slow because of weight unpacking
+
+############################################################
+  PROJECT GHOSTWEIGHT — END-TO-END BENCHMARK
+  2026-03-17 06:40:38
+############################################################
+
+============================================================
+  1. SYSTEM
+============================================================
+  CPU                                        AMD Ryzen 5 PRO 5675U with Radeon Graphics 
+  RAM total                                          65 GB
+  RAM available                                      45 GB
+  Python                                         3.13.9 
+  PyTorch                                    2.10.0+cu128 
+  CPU cap                                          AVX2 
+
+============================================================
+  2. KERNEL BENCHMARKS (M=1, isolated layer)
+============================================================
+
+  Layer           PyTorch    Ternary      Ghost   Spdup(T)   Spdup(G)
+  ------------ ---------- ---------- ---------- ---------- ----------
+  q/o_proj           0.6ms       1.4ms       3.0ms       0.4x       0.2x
+  k/v_proj           0.2ms       0.3ms       0.7ms       0.6x       0.3x
+  gate/up            2.4ms       4.1ms       8.5ms       0.6x       0.3x
+  down_proj          2.1ms       4.6ms       8.6ms       0.5x       0.2x
+  TOTAL (210 layers)       1.1s        2.2s        4.4s        0.5x       0.3x (30 decoder blocks × 7 layers)
+
+  Backward pass (q/o_proj, M=1):
+  q/o_proj bwd      25.1ms       1.4ms       2.0ms      17.6x      12.4x
+
+============================================================
+  3. STORAGE AUDIT
+============================================================
+  Full model (BF16 weights on disk)                4.83 GB
+  Checkpoint (grpo_step_0220.pt)                    3.1 MB  # full file
+    └─ adapter scales (learned)                     420 bytes  # ← the '420 bytes'
+    └─ u,v buffers (re-derivable)                  2.70 MB  # redundant, sha256(name) seeded
+  PRNG seed storage                                   8 bytes  # uint64
+  Total irreducible state                           428 bytes  # = 0.42 KB learned
+
+  NOTE: Runtime requires ~6GB RAM (4.5GB BF16 weights for scale capture
+        + 1.3GB FP32 LM head). '1KB' refers to learned parameters only.
+
+============================================================
+  4. GRPO TRAINING — TIMING FROM LOG
+============================================================
+
+  Total steps logged                                279 
+  Non-skip (gradient updates)                        49 
+  Skipped (zero variance)                           230   # 82%
+
+  Rollout time mean                                 176 s
+  Rollout time min/max                           62/529 s
+  Update time mean                                  229 s
+  Full step mean                                    406 s
+  Steps/hour                                        8.9 
+  Steps to 700                                     78.9 hours
+  Mean reward (last 20 steps)                     0.790 
+  Mean |scale| (last 20 steps)                 0.055391 
+
+============================================================
+  5. FULL MODEL FORWARD (real BitNet vs GhostWeight)
+============================================================
+
+  [Real BitNet] loading...
+Loading weights:   0%|          | 0/332 [00:00<?, ?it/s]Loading weights: 100%|██████████| 332/332 [00:00<00:00, 4467.21it/s]
+The following generation flags are not valid and may be ignored: ['temperature', 'top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+The attention mask and the pad token id were not set. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+The attention mask is not set and cannot be inferred from input because pad token is same as eos token. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+Both `max_new_tokens` (=5) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+The tokenizer you are loading from 'models/bitnet-b1.58-2B-4T-bf16' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+Soft-chip: using CPU (AVX2) backend
+Soft-chip: patched 210 AutoBitLinear layers [CPU] (weight packing: 42.9s)
+FP32 LM head: converting (128256, 2560) from torch.bfloat16 to float32 (1313 MB)
+FP32 LM head: patched successfully
+    [Real BitNet] forward (9 tok)                  2808 ms
+    [Real BitNet] generate (5 tok)                 6217 ms  # 0.80 tok/s
+    [Real BitNet] output                     Answer: 42 
+
+  [GhostWeight] loading...
+Loading weights:   0%|          | 0/332 [00:00<?, ?it/s]Loading weights: 100%|██████████| 332/332 [00:00<00:00, 4948.20it/s]
+The attention mask and the pad token id were not set. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Both `max_new_tokens` (=5) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Soft-chip: using GhostWeight backend (seed=42)
+Soft-chip: patched 210 AutoBitLinear layers [GhostWeight]
+FP32 LM head: converting (128256, 2560) from torch.bfloat16 to float32 (1313 MB)
+FP32 LM head: patched successfully
+    [GhostWeight] forward (9 tok)                  6161 ms
+    [GhostWeight] generate (5 tok)                11893 ms  # 0.42 tok/s
+    [GhostWeight] output                     Shelwoouyoocr Seeder 
+
+  Forward slowdown Ghost/Real                      2.19 x
+  Generation slowdown                              1.91 x
+
+############################################################
+  BENCHMARK COMPLETE
+############################################################
+
