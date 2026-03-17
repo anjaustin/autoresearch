@@ -496,7 +496,7 @@ _PACKED_ATTR = "_softchip_packed_weight"
 _BACKEND_ATTR = "_softchip_backend"
 
 
-def patch_model(model, backend="auto", verbose=True, use_ghost=False, ghost_seed=42):
+def patch_model(model, backend="auto", verbose=True, use_ghost=False, ghost_seed=42, scales_path=None):
     """
     Replace all AutoBitLinear forward passes with soft-chip kernel.
 
@@ -516,6 +516,22 @@ def patch_model(model, backend="auto", verbose=True, use_ghost=False, ghost_seed
         if verbose:
             print(f"Soft-chip: using GhostWeight backend (seed={ghost_seed})")
 
+        # Load pre-extracted scales if available (avoids loading 4.83GB BF16)
+        _ghost_scales = {}
+        _scales_search = [
+            scales_path,
+            'models/bitnet-b1.58-2B-4T-bf16/weight_scales.pt',
+        ]
+        for _sp in _scales_search:
+            if _sp and __import__('os').path.exists(_sp):
+                import torch as _t
+                _ghost_scales = _t.load(_sp, weights_only=True)
+                if verbose:
+                    print(f'Soft-chip: loaded {len(_ghost_scales)} pre-extracted scales from {_sp}')
+                break
+        if not _ghost_scales and verbose:
+            print('Soft-chip: no scales file found, computing from BF16 weights (slow)')
+
         count = 0
         for name, module in model.named_modules():
             if module.__class__.__name__ != "AutoBitLinear":
@@ -523,8 +539,12 @@ def patch_model(model, backend="auto", verbose=True, use_ghost=False, ghost_seed
 
             out_features, in_features = module.weight.shape
 
-            # Capture original weight scale
-            weight_scale = module.weight.abs().mean().item()
+            # Load weight scale from pre-extracted file if available,
+            # otherwise compute from BF16 weights (slow path)
+            if _ghost_scales and name in _ghost_scales:
+                weight_scale = _ghost_scales[name]
+            else:
+                weight_scale = module.weight.abs().mean().item()
 
             layer_id = count  # stable index across calls
 

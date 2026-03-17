@@ -69,7 +69,10 @@ gcc -O3 -mavx2 -mfma -march=native -fopenmp -shared -fPIC \
 gcc -O3 -mavx2 -mfma -shared -fPIC \
     -o softchip/ghost_matmul.so softchip/ghost_matmul_lut.c
 
-# Run (USE_GHOST=True is set in grpo_train.py)
+# Pre-extract weight scales once (1112x faster than reading BF16 at every startup)
+python extract_scales.py
+
+# Run (USE_GHOST=True and SCALES_PATH are set in grpo_train.py)
 nohup python -u grpo_train.py > grpo_ghost.log 2>&1 &
 
 # Resume after interruption

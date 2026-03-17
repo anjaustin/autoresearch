@@ -534,23 +534,28 @@ gcc -O3 -mavx2 -mfma -march=native -fopenmp -shared -fPIC \
 gcc -O3 -mavx2 -mfma -shared -fPIC \
     -o softchip/ghost_matmul.so softchip/ghost_matmul_lut.c
 
-# 5. (Optional) Validate kernels
+# 5. Pre-extract weight scales (ONE TIME — 840 bytes, 1112x faster than reading BF16)
+#    This eliminates the need to iterate over BF16 tensors at every startup.
+python extract_scales.py
+# Output: models/bitnet-b1.58-2B-4T-bf16/weight_scales.pt (10 KB)
+
+# 6. (Optional) Validate kernels
 python test_softchip_accuracy.py
 python test_backward.py
 python softchip/test_ghost_kernel.py
 
-# 6. Pre-flight check
+# 7. Pre-flight check
 python grpo_train.py --preflight
 
-# 7. Run the unified GhostWeight training (8-hour session)
-#    USE_GHOST=True is set in grpo_train.py
+# 8. Run the unified GhostWeight training (8-hour session)
+#    USE_GHOST=True and SCALES_PATH are set in grpo_train.py
 nohup python -u grpo_train.py > grpo_ghost.log 2>&1 &
 
-# 8. Resume from checkpoint after interruption
+# 9. Resume from checkpoint after interruption
 nohup python -u grpo_train.py --resume=checkpoints/grpo_step_XXXX.pt \
-    > grpo_ghost.log 2>&1 &
+    >> grpo_ghost.log 2>&1 &
 
-# 9. Monitor training
+# 10. Monitor training
 tail -f grpo_ghost.log
 ```
 
@@ -560,6 +565,7 @@ tail -f grpo_ghost.log
 |---|---|---|
 | `USE_GHOST` | `True` | PRNG weights — must be True for 1KB model |
 | `GHOST_SEED` | `42` | Deterministic PRNG seed (8 bytes total weight storage) |
+| `SCALES_PATH` | `models/.../weight_scales.pt` | Pre-extracted scales (1112x faster than reading BF16) |
 | `GROUP_SIZE` | `4` | GRPO completions per prompt |
 | `MAX_NEW_TOKENS` | `128` | Token budget per completion |
 | `MAX_STEPS` | `700` | Training steps per session |

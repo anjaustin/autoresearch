@@ -55,6 +55,7 @@ NUM_FEW_SHOT = 2  # few-shot examples in prompt
 # GhostWeight: use PRNG-generated weights (no storage, ~1KB model)
 USE_GHOST = True  # GhostWeight: PRNG weights (8 bytes) + TinyLoRA (1KB) = unified model
 GHOST_SEED = 42  # PRNG seed for deterministic weight regeneration
+SCALES_PATH = "models/bitnet-b1.58-2B-4T-bf16/weight_scales.pt"  # pre-extracted scales
 
 # Seed
 SEED = 42
@@ -815,7 +816,7 @@ def main():
 
     if USE_GHOST:
         print(f"  [GhostWeight] Using PRNG-generated weights (seed={GHOST_SEED})")
-        patch_model(model, use_ghost=True, ghost_seed=GHOST_SEED)
+        patch_model(model, use_ghost=True, ghost_seed=GHOST_SEED, scales_path=SCALES_PATH)
     else:
         patch_model(model, backend="cpu")
     patch_lm_head_fp32(model)
