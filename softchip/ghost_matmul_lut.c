@@ -114,18 +114,51 @@ void ghost_matmul_forward(
             for (int k = 0; k < K; k++) wrow[k] *= weight_scale;
         }
 
-        for (int m = 0; m < M; m++) {
-            const float *x = &input[m*K];
-            __m256 acc = _mm256_setzero_ps();
+        if (M == 4) {
+            const float *x0 = &input[0*K];
+            const float *x1 = &input[1*K];
+            const float *x2 = &input[2*K];
+            const float *x3 = &input[3*K];
+            __m256 acc0 = _mm256_setzero_ps();
+            __m256 acc1 = _mm256_setzero_ps();
+            __m256 acc2 = _mm256_setzero_ps();
+            __m256 acc3 = _mm256_setzero_ps();
             int k;
-            for (k = 0; k+8 <= K; k += 8)
-                acc = _mm256_fmadd_ps(_mm256_loadu_ps(&x[k]),
-                                      _mm256_loadu_ps(&wrow[k]), acc);
-            float s = 0.f;
-            for (; k < K; k++) s += x[k] * wrow[k];
-            float buf[8]; _mm256_storeu_ps(buf, acc);
-            output[m*N+n] = buf[0]+buf[1]+buf[2]+buf[3]+
-                            buf[4]+buf[5]+buf[6]+buf[7]+s;
+            for (k = 0; k+8 <= K; k += 8) {
+                __m256 w = _mm256_loadu_ps(&wrow[k]);
+                acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(&x0[k]), w, acc0);
+                acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(&x1[k]), w, acc1);
+                acc2 = _mm256_fmadd_ps(_mm256_loadu_ps(&x2[k]), w, acc2);
+                acc3 = _mm256_fmadd_ps(_mm256_loadu_ps(&x3[k]), w, acc3);
+            }
+            float s0=0.f, s1=0.f, s2=0.f, s3=0.f;
+            for (; k < K; k++) {
+                float w = wrow[k];
+                s0 += x0[k]*w; s1 += x1[k]*w; s2 += x2[k]*w; s3 += x3[k]*w;
+            }
+            float buf0[8], buf1[8], buf2[8], buf3[8];
+            _mm256_storeu_ps(buf0, acc0); _mm256_storeu_ps(buf1, acc1);
+            _mm256_storeu_ps(buf2, acc2); _mm256_storeu_ps(buf3, acc3);
+            output[0*N+n] = buf0[0]+buf0[1]+buf0[2]+buf0[3]+buf0[4]+buf0[5]+buf0[6]+buf0[7]+s0;
+            output[1*N+n] = buf1[0]+buf1[1]+buf1[2]+buf1[3]+buf1[4]+buf1[5]+buf1[6]+buf1[7]+s1;
+            output[2*N+n] = buf2[0]+buf2[1]+buf2[2]+buf2[3]+buf2[4]+buf2[5]+buf2[6]+buf2[7]+s2;
+            output[3*N+n] = buf3[0]+buf3[1]+buf3[2]+buf3[3]+buf3[4]+buf3[5]+buf3[6]+buf3[7]+s3;
+        } else {
+            for (int m = 0; m < M; m++) {
+                const float *x = &input[m*K];
+                float *out_ptr = &output[m*N+n];
+                __m256 acc = _mm256_setzero_ps();
+                int k;
+                for (k = 0; k+8 <= K; k += 8) {
+                    __m256 w = _mm256_loadu_ps(&wrow[k]);
+                    acc = _mm256_fmadd_ps(_mm256_loadu_ps(&x[k]), w, acc);
+                }
+                float s = 0.f;
+                for (; k < K; k++) s += x[k] * wrow[k];
+                float buf[8]; _mm256_storeu_ps(buf, acc);
+                *out_ptr = buf[0]+buf[1]+buf[2]+buf[3]+
+                           buf[4]+buf[5]+buf[6]+buf[7]+s;
+            }
         }
     }
 }

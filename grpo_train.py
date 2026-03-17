@@ -38,7 +38,7 @@ LOG_FILE = "grpo_log.jsonl"
 GROUP_SIZE = 4  # G: completions per prompt
 TEMPERATURE = 0.7  # sampling temperature for rollouts
 TOP_P = 0.9  # nucleus sampling threshold
-MAX_NEW_TOKENS = 256  # max tokens per completion (reduced for GhostWeight speed)
+MAX_NEW_TOKENS = 128  # tokens per completion
 BETA_KL = 0.01  # KL divergence penalty weight
 LEARNING_RATE = 0.01  # initial Adam learning rate
 LR_MIN = 0.001  # final learning rate (cosine decay)
@@ -53,7 +53,7 @@ CHECKPOINT_EVERY = 10  # save checkpoint every N steps
 NUM_FEW_SHOT = 2  # few-shot examples in prompt
 
 # GhostWeight: use PRNG-generated weights (no storage, ~1KB model)
-USE_GHOST = True  # If True, use GhostWeight kernel (500MB -> 1KB)
+USE_GHOST = False  # Use real BitNet weights; GhostWeight needs fresh run
 GHOST_SEED = 42  # PRNG seed for deterministic weight regeneration
 
 # Seed
@@ -272,68 +272,66 @@ def restore_adapter_scales(adapters, saved):
 
 
 @torch.no_grad()
-def generate_completion(
+def generate_group_completions(
     model,
     tokenizer,
-    input_ids,
+    prompt_ids,
+    group_size=GROUP_SIZE,
     max_new_tokens=MAX_NEW_TOKENS,
     temperature=TEMPERATURE,
     top_p=TOP_P,
 ):
-    """Generate one completion autoregressively with KV cache. Returns full sequence.
+    """Generate G completions in parallel using batching. Returns [G, seq_len] tensor."""
+    batch_size = group_size
+    # Expand prompt_ids to batch
+    input_ids = prompt_ids.expand(batch_size, -1)
 
-    Stops on: EOS token, or when "Q:" is generated (model starting next question),
-    or when "The answer is X." is followed by newlines.
-    """
     all_tokens = [input_ids]
     past_key_values = None
     cur_input = input_ids
-    # Track recent tokens for stop detection
-    recent_text = ""
 
+    # Track completion status and text for each sequence in batch
+    finished = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+    recent_texts = [""] * batch_size
+
+    generated_len = 0
     for _ in range(max_new_tokens):
         outputs = model(cur_input, past_key_values=past_key_values, use_cache=True)
         past_key_values = outputs.past_key_values
-        logits = outputs.logits[:, -1, :].float()  # [1, vocab_size]
+        logits = outputs.logits[:, -1, :].float()
 
-        # Temperature scaling
         if temperature > 0:
             logits = logits / temperature
+            # Top-p sampling
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+            cumprobs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+            remove_mask = cumprobs - torch.softmax(sorted_logits, dim=-1) >= top_p
+            sorted_logits[remove_mask] = float("-inf")
+            probs = torch.softmax(sorted_logits, dim=-1)
+            sampled_idx = torch.multinomial(probs, 1)
+            next_tokens = sorted_indices.gather(-1, sampled_idx)
         else:
-            # Greedy
-            next_token = logits.argmax(dim=-1, keepdim=True)
-            all_tokens.append(next_token)
-            cur_input = next_token
-            # Check stop
-            tok_text = tokenizer.decode(next_token[0], skip_special_tokens=True)
-            recent_text += tok_text
-            if _should_stop(recent_text):
-                break
-            continue
+            next_tokens = logits.argmax(dim=-1, keepdim=True)
 
-        # Top-p (nucleus) sampling
-        sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-        cumprobs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-        # Remove tokens with cumulative probability above top_p
-        # (keep at least the top token)
-        remove_mask = cumprobs - torch.softmax(sorted_logits, dim=-1) >= top_p
-        sorted_logits[remove_mask] = float("-inf")
+        # Mask out tokens for already finished sequences
+        next_tokens = torch.where(
+            finished.unsqueeze(-1), tokenizer.eos_token_id, next_tokens
+        )
+        all_tokens.append(next_tokens)
+        cur_input = next_tokens
 
-        probs = torch.softmax(sorted_logits, dim=-1)
-        sampled_idx = torch.multinomial(probs, 1)
-        next_token = sorted_indices.gather(-1, sampled_idx)
+        generated_len += 1
+        # Check stop conditions (require at least 3 tokens to avoid premature stop)
+        for i in range(batch_size):
+            if not finished[i]:
+                tok_text = tokenizer.decode(next_tokens[i], skip_special_tokens=True)
+                recent_texts[i] += tok_text
+                if next_tokens[i].item() == tokenizer.eos_token_id or (
+                    generated_len >= 3 and _should_stop(recent_texts[i])
+                ):
+                    finished[i] = True
 
-        all_tokens.append(next_token)
-        cur_input = next_token
-
-        # Stop on EOS token
-        if next_token.item() == model.config.eos_token_id:
-            break
-
-        # Check stop conditions on generated text
-        tok_text = tokenizer.decode(next_token[0], skip_special_tokens=True)
-        recent_text += tok_text
-        if _should_stop(recent_text):
+        if finished.all():
             break
 
     return torch.cat(all_tokens, dim=-1)
@@ -342,7 +340,7 @@ def generate_completion(
 def _should_stop(text):
     """Check if generation should stop based on text content."""
     # Stop if model starts generating a new question
-    if "Q:" in text:
+    if "\nQ:" in text or text.lstrip().startswith("Q:"):
         return True
     # Stop after a completed answer sentence, including simple fractions.
     if re.search(
@@ -356,8 +354,13 @@ def _should_stop(text):
 @torch.no_grad()
 def generate_greedy(model, tokenizer, input_ids, max_new_tokens=MAX_NEW_TOKENS):
     """Greedy generation for evaluation."""
-    return generate_completion(
-        model, tokenizer, input_ids, max_new_tokens=max_new_tokens, temperature=0
+    return generate_group_completions(
+        model,
+        tokenizer,
+        input_ids,
+        group_size=1,
+        max_new_tokens=max_new_tokens,
+        temperature=0,
     )
 
 
@@ -413,12 +416,14 @@ def grpo_step(
     prompt_ids = tokenizer(prompt_text, return_tensors="pt").input_ids
     prompt_len = prompt_ids.shape[1]
 
-    # 1. ROLLOUT: Generate G completions
+    # 1. ROLLOUT: Generate G completions sequentially (M=1 fastest for GhostWeight)
     t_rollout = time.time()
     completions = []
     completion_texts = []
     for g in range(GROUP_SIZE):
-        comp_ids = generate_completion(model, tokenizer, prompt_ids)
+        comp_ids = generate_group_completions(
+            model, tokenizer, prompt_ids, group_size=1
+        )
         completions.append(comp_ids)
         comp_text = tokenizer.decode(comp_ids[0, prompt_len:], skip_special_tokens=True)
         completion_texts.append(comp_text)
@@ -690,7 +695,9 @@ def preflight(model, tokenizer, adapters, train_data, test_data):
     print(f"    Prompt preview: {prompt_text[:200]}...")
 
     t0 = time.time()
-    comp_ids = generate_completion(model, tokenizer, prompt_ids, max_new_tokens=50)
+    comp_ids = generate_group_completions(
+        model, tokenizer, prompt_ids, group_size=1, max_new_tokens=50, temperature=0
+    )
     gen_time = time.time() - t0
     comp_text = tokenizer.decode(comp_ids[0, prompt_len:], skip_special_tokens=True)
     print(
@@ -896,9 +903,11 @@ def main():
         print(
             f"  Resuming from step {start_step}, eval_history={len(eval_history)} entries"
         )
-        # Recalculate base_acc for evaluation comparison
-        base_acc, _ = evaluate(model, tokenizer, test_data, num_samples=EVAL_SAMPLES)
-        print(f"  Base accuracy: {base_acc * 100:.1f}% (recalculated)")
+        # Recover base_acc from eval_history if available
+        base_entries = [e for e in eval_history if e.get("type") == "base"]
+        if base_entries:
+            base_acc = base_entries[-1]["accuracy"]
+            print(f"  Base accuracy: {base_acc * 100:.1f}% (from checkpoint history)")
     else:
         # Base model evaluation (before training)
         print("\n[EVAL] Base model accuracy (before training)...")
