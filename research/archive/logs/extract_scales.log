@@ -1,0 +1,16 @@
+Loading BF16 model from models/bitnet-b1.58-2B-4T-bf16...
+`torch_dtype` is deprecated! Use `dtype` instead!
+You don't have a GPU available to load the model, the inference will be slow because of weight unpacking
+Loading weights:   0%|          | 0/332 [00:00<?, ?it/s]Loading weights: 100%|██████████| 332/332 [00:00<00:00, 4685.70it/s]
+  Loaded in 6.7s
+Extracting weight scales from AutoBitLinear layers...
+  Extracted 210 scales
+  Min scale: 0.746094
+  Max scale: 4.593750
+  Mean scale: 2.331064
+
+Saved: models/bitnet-b1.58-2B-4T-bf16/weight_scales.pt
+  Size: 10961 bytes (10.70 KB)
+
+Done. You can now delete the BF16 weights after packing ternary,
+or keep them for gradient-based training.

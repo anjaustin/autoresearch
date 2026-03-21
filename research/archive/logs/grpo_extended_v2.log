@@ -1,0 +1,80 @@
+============================================================
+  GRPO Training: TinyLoRA on BitNet b1.58 2B4T
+============================================================
+
+[SETUP] Loading model...
+The tokenizer you are loading from 'models/bitnet-b1.58-2B-4T-bf16' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+`torch_dtype` is deprecated! Use `dtype` instead!
+You don't have a GPU available to load the model, the inference will be slow because of weight unpacking
+Loading weights:   0%|          | 0/332 [00:00<?, ?it/s]Loading weights: 100%|██████████| 332/332 [00:00<00:00, 6437.32it/s]
+  Model loaded in 8.8s
+[SETUP] Patching with soft-chip (CPU AVX2)...
+Soft-chip: using CPU (AVX2) backend
+Soft-chip: patched 210 AutoBitLinear layers [CPU] (weight packing: 34.2s)
+FP32 LM head: converting (128256, 2560) from torch.bfloat16 to float32 (1313 MB)
+FP32 LM head: patched successfully
+[SETUP] Injecting TinyLoRA adapters...
+  Injected 210 adapters (210 trainable params)
+[SETUP] Loading GSM8K dataset...
+  Train: 7473, Test: 1319
+
+============================================================
+  PRE-FLIGHT CHECKS
+============================================================
+
+[1] Adapters: 210 layers, 210 trainable params, 2.41B total
+    PASS
+
+[2] Test generation...
+    Prompt length: 223 tokens
+    Prompt preview: Solve the following math problems step by step.
+
+Q: There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they are done, there will be 21 trees. How many trees did ...
+    Generated (58.2s, 50 tokens):  The appetizer costs $10. The 4 entrees cost 4 x $20 = $80. So the total cost for food is $10 + $80 = $90. They also tip 20% of the total cost for the
+    PASS
+
+[3] Answer extraction test...
+    [0] Ground truth: 108
+    [1] Ground truth: 24
+    [2] Ground truth: 18
+    [3] Ground truth: 114
+    [4] Ground truth: 66
+    Extracted 5/5 ground truths
+    PASS
+
+[4] Base model accuracy (5 problems, greedy)...
+  eval [1/5] pred=18 gt=18 OK
+  eval [2/5] pred=3 gt=3 OK
+  eval [3/5] pred=40000 gt=70000 WRONG
+  eval [4/5] pred=540 gt=540 OK
+  eval [5/5] pred=2 gt=20 WRONG
+    Accuracy: 60% (363s)
+    PASS (any accuracy is OK — we just need it to run)
+
+[5] Training step timing (1 step, G=4)...
+    Total step time: 433.5s
+    Rollout time: 433.5s
+    Rewards: [1.0, 1.0, 1.0, 1.0]
+    Predictions: ['108', '108', '108', '108']
+    Ground truth: 108
+    (Step was skipped — all rewards identical, no gradient signal)
+    PASS
+
+[6] Memory usage: 7.2 GB / 64 GB
+    PASS
+
+============================================================
+  PRE-FLIGHT COMPLETE
+  Estimated: 8 steps/hour, 66 steps in 8 hours
+============================================================
+
+
+[RESUME] Loading checkpoint: checkpoints/grpo_step_0220.pt
+  Resuming from step 221, eval_history=9 entries
+  eval [1/20] pred=26 gt=18 WRONG
+  eval [2/20] pred=3 gt=3 OK
+  eval [3/20] pred=120000 gt=70000 WRONG
+  eval [4/20] pred=540 gt=540 OK
+  eval [5/20] pred=2 gt=20 WRONG
+  eval [6/20] pred=60 gt=64 WRONG
+  eval [7/20] pred=260 gt=260 OK

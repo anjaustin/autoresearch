@@ -1,0 +1,117 @@
+Loading tokenizer from models/bitnet-b1.58-2B-4T-bf16...
+The tokenizer you are loading from 'models/bitnet-b1.58-2B-4T-bf16' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+Loading model...
+`torch_dtype` is deprecated! Use `dtype` instead!
+You don't have a GPU available to load the model, the inference will be slow because of weight unpacking
+Loading weights:   0%|          | 0/332 [00:00<?, ?it/s]Loading weights:  71%|███████   | 235/332 [00:00<00:00, 2313.10it/s]Loading weights: 100%|██████████| 332/332 [00:00<00:00, 2413.01it/s]
+Model loaded.
+Soft-chip: using CPU (AVX2) backend
+Soft-chip: patched 210 AutoBitLinear layers [CPU] (weight packing: 29.4s)
+FP32 LM head: converting (128256, 2560) from torch.bfloat16 to float32 (1313 MB)
+FP32 LM head: patched successfully
+Adapters injected (840 experts, all scales = 0.0)
+Loading GSM8K test split...
+  1319 test examples. Evaluating first 20.
+
+============================================================
+CONDITION 1: Base model (all adapter scales = 0.0)
+============================================================
+The following generation flags are not valid and may be ignored: ['temperature', 'top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+The attention mask is not set and cannot be inferred from input because pad token is same as eos token. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  1/20] pred=          18  gt=        18  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  2/20] pred=           3  gt=         3  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  3/20] pred=       40000  gt=     70000  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  4/20] pred=         540  gt=       540  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  5/20] pred=           2  gt=        20  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  6/20] pred=           3  gt=        64  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  7/20] pred=         260  gt=       260  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  8/20] pred=          60  gt=       160  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  9/20] pred=         1.5  gt=        45  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 10/20] pred=         460  gt=       460  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 11/20] pred=         366  gt=       366  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 12/20] pred=         694  gt=       694  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 13/20] pred=          90  gt=        13  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 14/20] pred=           5  gt=        18  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 15/20] pred=          12  gt=        60  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 16/20] pred=          96  gt=       125  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 17/20] pred=         160  gt=       230  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 18/20] pred=        1450  gt=     57500  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 19/20] pred=           7  gt=         7  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 20/20] pred=         1.5  gt=         6  WRONG
+
+  Base model: 8/20 = 40.0%  (1475s, 73.7s/sample)
+
+============================================================
+CONDITION 2: Trained adapters from checkpoints/grpo_step_0220.pt
+============================================================
+  Loaded 0/840 scales from step 220. Mean |scale| = 0.0000
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  1/20] pred=          18  gt=        18  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  2/20] pred=           3  gt=         3  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  3/20] pred=       40000  gt=     70000  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  4/20] pred=         540  gt=       540  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  5/20] pred=           2  gt=        20  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  6/20] pred=           3  gt=        64  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  7/20] pred=         260  gt=       260  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  8/20] pred=          60  gt=       160  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [  9/20] pred=         1.5  gt=        45  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 10/20] pred=         460  gt=       460  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 11/20] pred=         366  gt=       366  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 12/20] pred=         694  gt=       694  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 13/20] pred=          90  gt=        13  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 14/20] pred=           5  gt=        18  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 15/20] pred=          12  gt=        60  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 16/20] pred=          96  gt=       125  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 17/20] pred=         160  gt=       230  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 18/20] pred=        1450  gt=     57500  WRONG
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 19/20] pred=           7  gt=         7  OK
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+  [ 20/20] pred=         1.5  gt=         6  WRONG
+
+  Trained (step 220): 8/20 = 40.0%  (1419s, 71.0s/sample)
+
+============================================================
+SUMMARY
+============================================================
+  Base model (zero adapters):   40.0%  (20 samples, GSM8K test)
+  Trained adapters (step 220):  40.0%  (+0.0pp vs base)
+
+Note: 95% confidence interval on N samples ≈ ±21.5pp

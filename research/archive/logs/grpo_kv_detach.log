@@ -1,0 +1,91 @@
+============================================================
+  GRPO Training: GhostChain (3 Experts + 1 Observer)
+============================================================
+  Loading tokenizer...
+The tokenizer you are loading from 'models/bitnet-b1.58-2B-4T-bf16' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+  Loading model...
+`torch_dtype` is deprecated! Use `dtype` instead!
+You don't have a GPU available to load the model, the inference will be slow because of weight unpacking
+Loading weights:   0%|          | 0/332 [00:00<?, ?it/s]Loading weights: 100%|██████████| 332/332 [00:00<00:00, 4006.85it/s]
+  Model loaded.
+  Injecting adapters...
+  Injected 840 GhostChain experts.
+  Initializing Ghost Engine...
+  Ghost Engine initialized.
+  Patching model...
+Soft-chip: using CPU (AVX2) backend
+Soft-chip: patched 210 AutoBitLinear layers [CPU] (weight packing: 32.3s)
+  Model patched. Patching LM head...
+FP32 LM head: converting (128256, 2560) from torch.bfloat16 to float32 (1313 MB)
+FP32 LM head: patched successfully
+  LM head patched.
+  Loading dataset...
+  Dataset loaded.
+
+Training Start: G=4, Budget=86400s +curriculum
+The attention mask is not set and cannot be inferred from input because pad token is same as eos token. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+[step 0021] rewards=[1.0, 1.0, 1.0, 0.0] loss=-0.0970 |scale|=0.0294 time=517.9s scan=5
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+[step 0022] rewards=[0.0, 0.0, 0.0, 0.0] loss=0.0000 |scale|=0.0000 time=427.3s scan=2
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+[step 0023] rewards=[0.0, 0.0, 0.0, 0.0] loss=0.0000 |scale|=0.0000 time=533.0s scan=1
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+[step 0024] rewards=[0.0, 0.0, 0.0, 0.0] loss=0.0000 |scale|=0.0000 time=343.3s scan=1
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+[step 0025] rewards=[0.0, 0.0, 0.0, 0.0] loss=0.0000 |scale|=0.0000 time=331.3s scan=1
+  eval [1/20] pred=None gt=18 WRONG
+  eval [2/20] pred=None gt=3 WRONG
+  eval [3/20] pred=None gt=70000 WRONG
+  eval [4/20] pred=None gt=540 WRONG
+  eval [5/20] pred=None gt=20 WRONG
+  eval [6/20] pred=None gt=64 WRONG
+  eval [7/20] pred=None gt=260 WRONG
+  eval [8/20] pred=None gt=160 WRONG
+  eval [9/20] pred=None gt=45 WRONG
+  eval [10/20] pred=None gt=460 WRONG
+  eval [11/20] pred=None gt=366 WRONG
+  eval [12/20] pred=402 gt=694 WRONG
+  eval [13/20] pred=None gt=13 WRONG
+  eval [14/20] pred=None gt=18 WRONG
+  eval [15/20] pred= gt=60 WRONG
+  eval [16/20] pred=None gt=125 WRONG
+  eval [17/20] pred=None gt=230 WRONG
+  eval [18/20] pred=None gt=57500 WRONG
+  eval [19/20] pred=None gt=7 WRONG
+  eval [20/20] pred=None gt=6 WRONG
+  Accuracy at step 25: 0.0%
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+[step 0026] rewards=[0.0, 1.0, 0.0, 0.0] loss=-0.0732 |scale|=0.0311 time=491.3s scan=1
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+[step 0027] rewards=[1.0, 1.0, 0.0, 0.0] loss=-0.0111 |scale|=0.0327 time=434.9s scan=1
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+[step 0028] rewards=[1.0, 1.0, 1.0, 1.0] loss=0.0000 |scale|=0.0000 time=244.7s scan=2
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+[step 0029] rewards=[1.0, 1.0, 1.0, 1.0] loss=0.0000 |scale|=0.0000 time=351.5s scan=1
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+[step 0030] rewards=[0.0, 0.0, 0.0, 1.0] loss=-0.0351 |scale|=0.0341 time=635.2s scan=1
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+[step 0031] rewards=[0.0, 1.0, 1.0, 0.0] loss=-0.0151 |scale|=0.0356 time=765.9s scan=1
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+[step 0032] rewards=[1.0, 1.0, 0.0, 0.0] loss=0.0068 |scale|=0.0369 time=396.5s scan=1
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+Both `max_new_tokens` (=96) and `max_length`(=4096) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)

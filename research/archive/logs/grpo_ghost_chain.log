@@ -1,0 +1,15 @@
+============================================================
+  GRPO Training: GhostChain (3 Experts + 1 Observer)
+============================================================
+The tokenizer you are loading from 'models/bitnet-b1.58-2B-4T-bf16' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+`torch_dtype` is deprecated! Use `dtype` instead!
+You don't have a GPU available to load the model, the inference will be slow because of weight unpacking
+Loading weights:   0%|          | 0/332 [00:00<?, ?it/s]Loading weights: 100%|██████████| 332/332 [00:00<00:00, 5632.01it/s]
+  Injected 840 GhostChain experts.
+Soft-chip: using GhostWeight backend (seed=42)
+Soft-chip: loaded 210 pre-extracted scales from models/bitnet-b1.58-2B-4T-bf16/weight_scales.pt
+Soft-chip: patched 210 AutoBitLinear layers [GhostWeight]
+FP32 LM head: converting (128256, 2560) from torch.bfloat16 to float32 (1313 MB)
+FP32 LM head: patched successfully
+
+Training Start: G=4, Budget=28800s

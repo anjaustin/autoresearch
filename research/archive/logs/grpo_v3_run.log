@@ -519,3 +519,89 @@ Q: There are 15 trees in the grove. Grove workers will plant trees in the grove 
   Checkpoint saved: checkpoints/grpo_step_0200.pt
 
 [step 0201] SKIP rewards=[0,0] rollout=103s elapsed=28265s
+[step 0202] SKIP rewards=[1,1] rollout=100s elapsed=28364s
+[step 0203] SKIP rewards=[1,1] rollout=127s elapsed=28491s
+[step 0204] SKIP rewards=[1,1] rollout=93s elapsed=28584s
+[step 0205] SKIP rewards=[1,1] rollout=107s elapsed=28691s
+[step 0206] SKIP rewards=[1,1] rollout=107s elapsed=28798s
+[step 0207] SKIP rewards=[1,1] rollout=100s elapsed=28898s
+
+Time budget reached (28800s). Stopping.
+
+============================================================
+  FINAL EVALUATION
+============================================================
+  eval [1/20] pred=18 gt=18 OK
+  eval [2/20] pred=3 gt=3 OK
+  eval [3/20] pred=40000 gt=70000 WRONG
+  eval [4/20] pred=540 gt=540 OK
+  eval [5/20] pred=2 gt=20 WRONG
+  eval [6/20] pred=60 gt=64 WRONG
+  eval [7/20] pred=260 gt=260 OK
+  eval [8/20] pred=60 gt=160 WRONG
+  eval [9/20] pred=311 gt=45 WRONG
+  eval [10/20] pred=460 gt=460 OK
+  eval [11/20] pred=366 gt=366 OK
+  eval [12/20] pred=694 gt=694 OK
+  eval [13/20] pred=12 gt=13 WRONG
+  eval [14/20] pred=18 gt=18 OK
+  eval [15/20] pred=60 gt=60 OK
+  eval [16/20] pred=221 gt=125 WRONG
+  eval [17/20] pred=160 gt=230 WRONG
+  eval [18/20] pred=1450 gt=57500 WRONG
+  eval [19/20] pred=7 gt=7 OK
+  eval [20/20] pred=4 gt=6 WRONG
+  Checkpoint saved: checkpoints/grpo_step_0208.pt
+
+============================================================
+  ADAPTER SCALE ANALYSIS
+============================================================
+
+Top 20 most-moved adapters:
+  -0.141602  model.layers.21.mlp.up_proj
+  +0.139648  model.layers.3.self_attn.v_proj
+  +0.138672  model.layers.17.self_attn.o_proj
+  -0.133789  model.layers.11.mlp.down_proj
+  +0.133789  model.layers.22.mlp.down_proj
+  -0.131836  model.layers.15.self_attn.q_proj
+  +0.130859  model.layers.28.mlp.up_proj
+  -0.128906  model.layers.4.mlp.down_proj
+  -0.117188  model.layers.5.self_attn.q_proj
+  +0.116699  model.layers.15.self_attn.o_proj
+  +0.115234  model.layers.10.mlp.down_proj
+  +0.113281  model.layers.5.mlp.down_proj
+  -0.112305  model.layers.4.mlp.up_proj
+  +0.111328  model.layers.24.mlp.down_proj
+  +0.110352  model.layers.10.self_attn.o_proj
+  +0.108887  model.layers.26.self_attn.k_proj
+  +0.103516  model.layers.10.mlp.up_proj
+  -0.103027  model.layers.20.mlp.down_proj
+  +0.102051  model.layers.1.mlp.gate_proj
+  +0.100586  model.layers.4.self_attn.q_proj
+
+Bottom 10 (least moved):
+  +0.005280  model.layers.8.mlp.down_proj
+  +0.004791  model.layers.15.self_attn.k_proj
+  -0.004547  model.layers.0.self_attn.q_proj
+  +0.004120  model.layers.7.mlp.down_proj
+  +0.004059  model.layers.1.mlp.up_proj
+  +0.003891  model.layers.6.self_attn.v_proj
+  -0.001823  model.layers.23.mlp.down_proj
+  -0.001755  model.layers.7.self_attn.v_proj
+  +0.001488  model.layers.18.mlp.down_proj
+  +0.000538  model.layers.24.self_attn.o_proj
+
+============================================================
+  TRAINING SUMMARY
+============================================================
+  Steps completed:  208
+  Steps skipped:    169 (81%)
+  Training time:    28898s (8.0h)
+  Base accuracy:    50.0%
+  Final accuracy:   50.0%
+  Running reward:   0.87
+  Mean |scale|:     0.054609
+  Max |scale|:      0.141602
+
+Log saved to grpo_log.jsonl
+Checkpoints in checkpoints/

@@ -1,0 +1,137 @@
+============================================================
+  GRPO Training: TinyLoRA on BitNet b1.58 2B4T
+============================================================
+
+[SETUP] Loading model...
+The tokenizer you are loading from 'models/bitnet-b1.58-2B-4T-bf16' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+`torch_dtype` is deprecated! Use `dtype` instead!
+You don't have a GPU available to load the model, the inference will be slow because of weight unpacking
+Loading weights:   0%|          | 0/332 [00:00<?, ?it/s]Loading weights: 100%|██████████| 332/332 [00:00<00:00, 5368.17it/s]
+  Model loaded in 8.5s
+[SETUP] Patching with soft-chip (CPU AVX2)...
+Soft-chip: using CPU (AVX2) backend
+Soft-chip: patched 210 AutoBitLinear layers [CPU] (weight packing: 34.6s)
+FP32 LM head: converting (128256, 2560) from torch.bfloat16 to float32 (1313 MB)
+FP32 LM head: patched successfully
+[SETUP] Injecting TinyLoRA adapters...
+  Injected 210 adapters (210 trainable params)
+[SETUP] Loading GSM8K dataset...
+  Train: 7473, Test: 1319
+
+============================================================
+  PRE-FLIGHT CHECKS
+============================================================
+
+[1] Adapters: 210 layers, 210 trainable params, 2.41B total
+    PASS
+
+[2] Test generation...
+    Prompt length: 223 tokens
+    Prompt preview: Solve the following math problems step by step.
+
+Q: There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they are done, there will be 21 trees. How many trees did ...
+    Generated (56.2s, 50 tokens):  The appetizer costs $10. The 4 entrees cost 4 x $20 = $80. So the total cost for food is $10 + $80 = $90. They also tip 20% of the total cost for the
+    PASS
+
+[3] Answer extraction test...
+    [0] Ground truth: 108
+    [1] Ground truth: 24
+    [2] Ground truth: 18
+    [3] Ground truth: 114
+    [4] Ground truth: 66
+    Extracted 5/5 ground truths
+    PASS
+
+[4] Base model accuracy (5 problems, greedy)...
+  eval [1/5] pred=18 gt=18 OK
+  eval [2/5] pred=3 gt=3 OK
+  eval [3/5] pred=40000 gt=70000 WRONG
+  eval [4/5] pred=540 gt=540 OK
+  eval [5/5] pred=2 gt=20 WRONG
+    Accuracy: 60% (308s)
+    PASS (any accuracy is OK — we just need it to run)
+
+[5] Training step timing (1 step, G=4)...
+    Total step time: 322.8s
+    Rollout time: 322.8s
+    Rewards: [1.0, 1.0, 1.0, 1.0]
+    Predictions: ['108', '108', '108', '108']
+    Ground truth: 108
+    (Step was skipped — all rewards identical, no gradient signal)
+    PASS
+
+[6] Memory usage: 7.3 GB / 64 GB
+    PASS
+
+============================================================
+  PRE-FLIGHT COMPLETE
+  Estimated: 11 steps/hour, 89 steps in 8 hours
+============================================================
+
+
+[RESUME] Loading checkpoint: checkpoints/grpo_step_0200.pt
+  Resuming from step 201, eval_history=9 entries
+
+============================================================
+  TRAINING START
+  210 adapters, G=4, lr=0.01
+  Time budget: 28800s (8.0h)
+============================================================
+
+[step 0201] rewards=[1,1,1,0] loss=1.5773 kl=0.0288 |scale|=0.0552 |grad|=3.73e-05 lr=0.0083 rollout=273s update=394.7s total=668s running_r=0.90
+[step 0202] rewards=[1,1,0,0] loss=0.7050 kl=-0.0571 |scale|=0.0556 |grad|=4.53e-05 lr=0.0083 rollout=268s update=418.4s total=686s running_r=0.85
+[step 0203] SKIP rewards=[1,1,1,1] rollout=191s elapsed=1545s
+[step 0204] SKIP rewards=[1,1,1,1] rollout=208s elapsed=1753s
+[step 0205] SKIP rewards=[1,1,1,1] rollout=249s elapsed=2002s
+[step 0206] SKIP rewards=[1,1,1,1] rollout=277s elapsed=2279s
+[step 0207] rewards=[1,0,1,1] loss=0.0928 kl=-0.0287 |scale|=0.0562 |grad|=4.18e-05 lr=0.0082 rollout=181s update=280.4s total=462s running_r=0.94
+[step 0208] SKIP rewards=[1,1,1,1] rollout=582s elapsed=3323s
+[step 0209] rewards=[1,1,0,0] loss=-0.2115 kl=0.1301 |scale|=0.0567 |grad|=4.36e-05 lr=0.0082 rollout=264s update=375.8s total=640s running_r=0.93
+[step 0210] SKIP rewards=[1,1,1,1] rollout=195s elapsed=4157s
+  Checkpoint saved: checkpoints/grpo_step_0210.pt
+[step 0211] SKIP rewards=[1,1,1,1] rollout=389s elapsed=4546s
+[step 0212] SKIP rewards=[1,1,1,1] rollout=392s elapsed=4938s
+[step 0213] rewards=[1,1,1,0] loss=-3.3293 kl=-0.2181 |scale|=0.0573 |grad|=5.06e-05 lr=0.0081 rollout=445s update=635.4s total=1081s running_r=0.95
+[step 0214] SKIP rewards=[1,1,1,1] rollout=315s elapsed=6333s
+[step 0215] SKIP rewards=[0,0,0,0] rollout=372s elapsed=6705s
+[step 0216] rewards=[1,0,1,1] loss=0.2081 kl=0.2091 |scale|=0.0578 |grad|=3.61e-05 lr=0.0080 rollout=328s update=470.2s total=798s running_r=0.93
+[step 0217] SKIP rewards=[1,1,1,1] rollout=348s elapsed=7852s
+[step 0218] rewards=[0,0,0,1] loss=-8.3872 kl=0.0018 |scale|=0.0583 |grad|=3.75e-05 lr=0.0080 rollout=431s update=560.1s total=991s running_r=0.92
+[step 0219] SKIP rewards=[1,1,1,1] rollout=251s elapsed=9094s
+[step 0220] rewards=[0,1,1,0] loss=-25.0351 kl=-0.0000 |scale|=0.0588 |grad|=6.75e-05 lr=0.0080 rollout=485s update=549.1s total=1034s running_r=0.91
+  Checkpoint saved: checkpoints/grpo_step_0220.pt
+[step 0221] SKIP rewards=[1,1,1,1] rollout=301s elapsed=10429s
+[step 0222] SKIP rewards=[0,0,0,0] rollout=261s elapsed=10690s
+[step 0223] SKIP rewards=[1,1,1,1] rollout=286s elapsed=10976s
+[step 0224] rewards=[1,0,0,0] loss=-9.0280 kl=0.2456 |scale|=0.0593 |grad|=7.75e-05 lr=0.0079 rollout=468s update=595.7s total=1063s running_r=0.89
+[step 0225] rewards=[0,1,0,0] loss=-8.8408 kl=-0.1193 |scale|=0.0597 |grad|=5.96e-05 lr=0.0079 rollout=529s update=597.8s total=1127s running_r=0.89
+
+[EVAL] Step 225...
+  eval [1/20] pred=18 gt=18 OK
+  eval [2/20] pred=3 gt=3 OK
+  eval [3/20] pred=40000 gt=70000 WRONG
+  eval [4/20] pred=540 gt=540 OK
+  eval [5/20] pred=2 gt=20 WRONG
+  eval [6/20] pred=60 gt=64 WRONG
+  eval [7/20] pred=260 gt=260 OK
+  eval [8/20] pred=100 gt=160 WRONG
+  eval [9/20] pred=311 gt=45 WRONG
+  eval [10/20] pred=460 gt=460 OK
+  eval [11/20] pred=366 gt=366 OK
+  eval [12/20] pred=694 gt=694 OK
+  eval [13/20] pred=12 gt=13 WRONG
+  eval [14/20] pred=18 gt=18 OK
+  eval [15/20] pred=60 gt=60 OK
+  eval [16/20] pred=221 gt=125 WRONG
+  eval [17/20] pred=230 gt=230 OK
+  eval [18/20] pred=1450 gt=57500 WRONG
+  eval [19/20] pred=7 gt=7 OK
+  eval [20/20] pred=4 gt=6 WRONG
+Traceback (most recent call last):
+  File "/home/ztflynn/001/autoresearch/grpo_train.py", line 1055, in <module>
+    main()
+    ~~~~^^
+  File "/home/ztflynn/001/autoresearch/grpo_train.py", line 999, in main
+    f"  Accuracy: {acc * 100:.1f}% (base: {base_acc * 100:.1f}%) [{eval_time:.0f}s]"
+                                           ^^^^^^^^
+UnboundLocalError: cannot access local variable 'base_acc' where it is not associated with a value

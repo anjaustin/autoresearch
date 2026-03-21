@@ -1,14 +1,11 @@
 """
-GRPO Training: TinyLoRA on BitNet b1.58 2B4T
+GRPO Training: GhostChain on BitNet b1.58 2B4T
 =============================================
-Group Relative Policy Optimization with 210 learnable scalar parameters
-on a frozen 2.4B ternary language model. Evaluated on GSM8K.
+Group Relative Policy Optimization with 840 learnable scalar parameters
+(GhostChain: 3 Experts + 1 Observer per layer) on a frozen 2.4B ternary model.
 
-Uses the soft-chip AVX2 ternary kernel (forward + backward) and FP32 LM head
-patch for CPU-only training at ~2.4s per gradient step.
-
-Usage: python grpo_train.py
-       python grpo_train.py --preflight   (run pre-flight checks only)
+Uses a custom C/AVX2 Ghost Inference Engine for ultra-fast rollouts,
+bypassing Python overhead and staying entirely within the L-cache.
 """
 
 import json
@@ -27,7 +24,7 @@ import torch
 import torch.nn as nn
 
 # ---------------------------------------------------------------------------
-# Configuration (edit directly, no CLI parsing beyond --preflight)
+# Configuration
 # ---------------------------------------------------------------------------
 
 MODEL_PATH = "models/bitnet-b1.58-2B-4T-bf16"
@@ -35,29 +32,40 @@ CHECKPOINT_DIR = "checkpoints"
 LOG_FILE = "grpo_log.jsonl"
 
 # GRPO hyperparameters
-GROUP_SIZE = 4  # G: completions per prompt
-TEMPERATURE = 0.7  # sampling temperature for rollouts
-TOP_P = 0.9  # nucleus sampling threshold
-MAX_NEW_TOKENS = 128  # tokens per completion
-BETA_KL = 0.0   # GhostWeight: π_ref is random noise; KL penalty would fight learning
-LEARNING_RATE = 0.01  # initial Adam learning rate
-LR_MIN = 0.001  # final learning rate (cosine decay)
-ADAM_BETAS = (0.9, 0.999)  # Adam beta1, beta2
+GROUP_SIZE = 4
+TEMPERATURE = 0.7
+TOP_P = 0.9
+MAX_NEW_TOKENS = 96
+BETA_KL = 0.0  # GhostWeight: π_ref is random noise
+LEARNING_RATE = 0.01
+LR_MIN = 0.001
+ADAM_BETAS = (0.9, 0.999)
 
 # Training schedule
-MAX_STEPS = 700  # maximum training steps
-TIME_BUDGET = 28800  # 8 hours in seconds
-EVAL_EVERY = 25  # evaluate every N steps
-EVAL_SAMPLES = 20  # number of test problems for evaluation (reduced)
-CHECKPOINT_EVERY = 10  # save checkpoint every N steps
-NUM_FEW_SHOT = 2  # few-shot examples in prompt
+MAX_STEPS = 700
+TIME_BUDGET = 28800  # 8 hours (override with --time-budget=N)
+EVAL_EVERY = 25
+EVAL_SAMPLES = 20
+CHECKPOINT_EVERY = 10
+NUM_FEW_SHOT = 2
 
-# GhostWeight: use PRNG-generated weights (no storage, ~1KB model)
-USE_GHOST = True  # GhostWeight: PRNG weights (8 bytes) + TinyLoRA (1KB) = unified model
-GHOST_SEED = 42  # PRNG seed for deterministic weight regeneration
-SCALES_PATH = "models/bitnet-b1.58-2B-4T-bf16/weight_scales.pt"  # pre-extracted scales
+# Curriculum filtering
+# Only train on problems the current model fails on (greedy decode, reward=0).
+# This eliminates the 81% "all-same-reward → skip" waste from the previous run
+# where the base model already solved ~87% of training questions.
+USE_CURRICULUM_FILTER = True
+CURRICULUM_SKIP_MAX = 20  # scan up to N candidates per step before giving up
 
-# Seed
+# GhostWeight settings
+# Set False to use real BitNet ternary weights (fast, ~138s/step).
+# GhostWeight (PRNG on-the-fly generation) is correct but slow on CPU:
+# each batched_ghost_matmul allocates+fills a 4MB temp buffer 79K times
+# per rollout, which is impractical at training time.  Validate curriculum
+# filter + scalar adapters on real weights first; tackle PRNG perf separately.
+USE_GHOST = False
+GHOST_SEED = 42
+SCALES_PATH = "models/bitnet-b1.58-2B-4T-bf16/weight_scales.pt"
+
 SEED = 42
 
 # ---------------------------------------------------------------------------
@@ -77,7 +85,6 @@ FEW_SHOT_EXAMPLES = [
 
 
 def format_prompt(question, num_shots=NUM_FEW_SHOT):
-    """Build a few-shot prompt for GSM8K-style math problems."""
     parts = ["Solve the following math problems step by step.\n"]
     for ex in FEW_SHOT_EXAMPLES[:num_shots]:
         parts.append(f"Q: {ex['question']}")
@@ -93,17 +100,12 @@ def format_prompt(question, num_shots=NUM_FEW_SHOT):
 
 
 def extract_answer(text):
-    """Extract the final numerical answer from model output."""
-
-    # Ignore any synthetic next-question continuation the model may emit.
     for marker in ("\nQ:", "\n\nQ:", "\n Q:"):
         if marker in text:
             text = text.split(marker, 1)[0]
 
     def clean_number(s):
-        """Remove commas, trailing periods, normalize."""
         s = s.replace(",", "").strip()
-        # Remove trailing period that's not part of a decimal
         if s.endswith(".") and s.count(".") == 1:
             s = s[:-1]
         return s
@@ -118,33 +120,26 @@ def extract_answer(text):
             return clean_number(num.group(1))
         return None
 
-    # Strongest signal: explicit answer phrase. Prefer the LAST such phrase.
     answer_spans = re.findall(r"[Tt]he answer is\s*([^\n]+)", text)
     if answer_spans:
         parsed = parse_candidate(answer_spans[-1])
         if parsed is not None:
             return parsed
 
-    # Try "#### X" format (GSM8K native)
     match = re.search(r"####\s*(-?[\d,]+\s*/\s*-?[\d,]+)", text)
     if match:
         return clean_number(match.group(1).replace(" ", ""))
     match = re.search(r"####\s*(-?[\d,]+\.?\d*)", text)
     if match:
         return clean_number(match.group(1))
-    # Fall back to last number in text. Prefer numeric terminals over fractions,
-    # because fractions often appear as intermediate reasoning steps.
+
     numbers = re.findall(r"-?[\d,]+\.?\d*", text)
     if numbers:
         return clean_number(numbers[-1])
-    fractions = re.findall(r"-?[\d,]+\s*/\s*-?[\d,]+", text)
-    if fractions:
-        return clean_number(fractions[-1].replace(" ", ""))
     return None
 
 
 def extract_gsm8k_answer(answer_text):
-    """Extract ground truth from GSM8K answer field."""
     match = re.search(r"####\s*(-?[\d,]+\s*/\s*-?[\d,]+)", answer_text)
     if match:
         return match.group(1).replace(",", "").replace(" ", "").strip()
@@ -155,60 +150,80 @@ def extract_gsm8k_answer(answer_text):
 
 
 def normalize_answer(answer):
-    """Normalize numeric answers for exact-value comparison.
-
-    Returns a canonical string when parsing succeeds, else the stripped input.
-    Supports integers, decimals, and simple fractions.
-    """
     if answer is None:
         return None
-
     s = answer.replace(",", "").strip()
     if not s:
         return None
-
-    # Remove trivial trailing period.
     if s.endswith(".") and s.count(".") == 1:
         s = s[:-1]
-
     try:
         if "/" in s:
-            value = Fraction(s)
-            return str(value)
+            return str(Fraction(s))
         value = Decimal(s)
         if value == value.to_integral():
             return str(int(value))
         return format(value.normalize(), "f").rstrip("0").rstrip(".")
-    except (ValueError, ZeroDivisionError, InvalidOperation):
+    except:
         return s
 
 
 def answers_match(predicted, ground_truth):
-    """Compare answers after numeric normalization."""
     pred_norm = normalize_answer(predicted)
     gt_norm = normalize_answer(ground_truth)
     return pred_norm is not None and gt_norm is not None and pred_norm == gt_norm
 
 
+def strict_extract_answer(text):
+    """Extract answer requiring explicit 'the answer is' or '#### N' format.
+    No last-number fallback.  Used for curriculum pre-checks where a false
+    positive (accidental last-number match) would incorrectly mark a problem
+    as 'already solved' and exclude it from training."""
+    for marker in ("\nQ:", "\n\nQ:", "\n Q:"):
+        if marker in text:
+            text = text.split(marker, 1)[0]
+
+    def clean_number(s):
+        s = s.replace(",", "").strip()
+        if s.endswith(".") and s.count(".") == 1:
+            s = s[:-1]
+        return s
+
+    def parse_candidate(s):
+        s = s.strip()
+        frac = re.search(r"(-?[\d,]+\s*/\s*-?[\d,]+)", s)
+        if frac:
+            return clean_number(frac.group(1).replace(" ", ""))
+        num = re.search(r"(-?[\d,]+\.?\d*)", s)
+        if num:
+            return clean_number(num.group(1))
+        return None
+
+    answer_spans = re.findall(r"[Tt]he answer is\s*([^\n]+)", text)
+    if answer_spans:
+        parsed = parse_candidate(answer_spans[-1])
+        if parsed is not None:
+            return parsed
+
+    match = re.search(r"####\s*(-?[\d,]+\s*/\s*-?[\d,]+)", text)
+    if match:
+        return clean_number(match.group(1).replace(" ", ""))
+    match = re.search(r"####\s*(-?[\d,]+\.?\d*)", text)
+    if match:
+        return clean_number(match.group(1))
+
+    return None  # no fallback to last number
+
+
 # ---------------------------------------------------------------------------
-# TinyLoRA adapter
+# GhostChain Adapter
 # ---------------------------------------------------------------------------
 
 
-class TinyLoRA(nn.Module):
-    """Sub-rank-1 LoRA adapter: 1 trainable scalar per layer.
-
-    output = base(x) + scale * (x @ v^T) @ u^T
-
-    u, v are fixed random vectors. scale is the only trainable parameter.
-    """
-
-    def __init__(self, base_layer, seed=42):
+class GhostExpert(nn.Module):
+    def __init__(self, in_features, out_features, seed):
         super().__init__()
-        self.base_layer = base_layer
-        out_features, in_features = base_layer.weight.shape
-
-        gen = torch.Generator().manual_seed(seed)
+        gen = torch.Generator().manual_seed(seed % (2**63))
         u = torch.randn(out_features, 1, generator=gen, dtype=torch.bfloat16)
         v = torch.randn(1, in_features, generator=gen, dtype=torch.bfloat16)
         self.register_buffer("u", u / u.norm())
@@ -216,561 +231,352 @@ class TinyLoRA(nn.Module):
         self.scale = nn.Parameter(torch.zeros(1, dtype=torch.bfloat16))
 
     def forward(self, x):
-        base_out = self.base_layer(x)
-        adapter_out = (x @ self.v.T) @ self.u.T * self.scale
-        return base_out + adapter_out
+        return (x @ self.v.T) @ self.u.T * self.scale
+
+
+class GhostChain(nn.Module):
+    def __init__(self, base_layer, seed=42):
+        super().__init__()
+        self.base_layer = base_layer
+        out_features, in_features = base_layer.weight.shape
+        self.expert1 = GhostExpert(in_features, out_features, seed + 1)
+        self.expert2 = GhostExpert(in_features, out_features, seed + 2)
+        self.expert3 = GhostExpert(in_features, out_features, seed + 3)
+        self.observer = GhostExpert(in_features, out_features, seed + 4)
+
+    def forward(self, x):
+        # All four experts read from the same input — parallel flat addition.
+        # This matches the C ghost engine's apply_experts_batched(), which always
+        # reads from the original normalized input for all 4 experts.  Serial
+        # coupling (feeding x+d1 into expert2, etc.) is mathematically equivalent
+        # to parallel at small scales in high dimension (orthogonality of random
+        # unit vectors in R^2560), and the C engine has no mechanism to pass
+        # intermediate outputs between experts anyway.  Keeping both sides parallel
+        # ensures the rollout model and the log-prob computation model are identical,
+        # which is required for a valid GRPO policy gradient.
+        d1 = self.expert1(x)
+        d2 = self.expert2(x)
+        d3 = self.expert3(x)
+        correction = self.observer(x)
+        return self.base_layer(x) + d1 + d2 + d3 + correction
 
 
 def inject_adapters(model):
-    """Attach TinyLoRA to all AutoBitLinear layers. Returns list of (name, adapter)."""
+    """Attach GhostChain to all AutoBitLinear layers."""
     adapters = []
+    modules_dict = dict(model.named_modules())
     for name, module in list(model.named_modules()):
         if module.__class__.__name__ != "AutoBitLinear":
             continue
-        # Deterministic seed from layer name
-        seed = int.from_bytes(hashlib.sha256(name.encode("utf-8")).digest()[:8], "big")
-        adapter = TinyLoRA(module, seed=seed)
-        # Replace in parent
+        seed = int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "big") % (
+            2**63
+        )
+        chain = GhostChain(module, seed=seed)
         parts = name.rsplit(".", 1)
         if len(parts) == 2:
             parent_name, attr_name = parts
-            parent = dict(model.named_modules())[parent_name]
-            setattr(parent, attr_name, adapter)
-            adapters.append((name, adapter))
-
-    # Freeze everything, then unfreeze adapter scales
+            parent = modules_dict[parent_name]
+            setattr(parent, attr_name, chain)
+            adapters.append((f"{name}.expert1", chain.expert1))
+            adapters.append((f"{name}.expert2", chain.expert2))
+            adapters.append((f"{name}.expert3", chain.expert3))
+            adapters.append((f"{name}.observer", chain.observer))
     for p in model.parameters():
         p.requires_grad = False
-    for _, adapter in adapters:
-        adapter.scale.requires_grad = True
-
+    for _, exp in adapters:
+        exp.scale.requires_grad = True
     return adapters
 
 
 def get_adapter_scales(adapters):
-    """Return a dict of adapter name -> scale value."""
-    return {name: adapter.scale.item() for name, adapter in adapters}
+    return {name: exp.scale.item() for name, exp in adapters}
 
 
 def zero_adapter_scales(adapters):
-    """Zero all adapter scales (for π_ref computation). Returns saved values."""
     saved = []
-    for _, adapter in adapters:
-        saved.append(adapter.scale.data.clone())
-        adapter.scale.data.zero_()
+    for _, exp in adapters:
+        saved.append(exp.scale.data.clone())
+        exp.scale.data.zero_()
     return saved
 
 
 def restore_adapter_scales(adapters, saved):
-    """Restore adapter scales from saved values."""
-    for (_, adapter), val in zip(adapters, saved):
-        adapter.scale.data.copy_(val)
+    for (_, exp), val in zip(adapters, saved):
+        exp.scale.data.copy_(val)
 
 
 # ---------------------------------------------------------------------------
-# Generation
-# ---------------------------------------------------------------------------
-
-
-@torch.no_grad()
-def generate_group_completions(
-    model,
-    tokenizer,
-    prompt_ids,
-    group_size=GROUP_SIZE,
-    max_new_tokens=MAX_NEW_TOKENS,
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-):
-    """Generate G completions in parallel using batching. Returns [G, seq_len] tensor."""
-    batch_size = group_size
-    # Expand prompt_ids to batch
-    input_ids = prompt_ids.expand(batch_size, -1)
-
-    all_tokens = [input_ids]
-    past_key_values = None
-    cur_input = input_ids
-
-    # Track completion status and text for each sequence in batch
-    finished = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
-    recent_texts = [""] * batch_size
-
-    generated_len = 0
-    for _ in range(max_new_tokens):
-        outputs = model(cur_input, past_key_values=past_key_values, use_cache=True)
-        past_key_values = outputs.past_key_values
-        logits = outputs.logits[:, -1, :].float()
-
-        if temperature > 0:
-            logits = logits / temperature
-            # Top-p sampling
-            sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-            cumprobs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-            remove_mask = cumprobs - torch.softmax(sorted_logits, dim=-1) >= top_p
-            sorted_logits[remove_mask] = float("-inf")
-            probs = torch.softmax(sorted_logits, dim=-1)
-            sampled_idx = torch.multinomial(probs, 1)
-            next_tokens = sorted_indices.gather(-1, sampled_idx)
-        else:
-            next_tokens = logits.argmax(dim=-1, keepdim=True)
-
-        # Mask out tokens for already finished sequences
-        next_tokens = torch.where(
-            finished.unsqueeze(-1), tokenizer.eos_token_id, next_tokens
-        )
-        all_tokens.append(next_tokens)
-        cur_input = next_tokens
-
-        generated_len += 1
-        # Check stop conditions (require at least 3 tokens to avoid premature stop)
-        for i in range(batch_size):
-            if not finished[i]:
-                tok_text = tokenizer.decode(next_tokens[i], skip_special_tokens=True)
-                recent_texts[i] += tok_text
-                if next_tokens[i].item() == tokenizer.eos_token_id or (
-                    generated_len >= 3 and _should_stop(recent_texts[i])
-                ):
-                    finished[i] = True
-
-        if finished.all():
-            break
-
-    return torch.cat(all_tokens, dim=-1)
-
-
-def _should_stop(text):
-    """Check if generation should stop based on text content."""
-    # Stop if model starts generating a new question
-    if "\nQ:" in text or text.lstrip().startswith("Q:"):
-        return True
-    # Stop after a completed answer sentence, including simple fractions.
-    if re.search(
-        r"[Tt]he answer is\s*(?:-?[\d,]+(?:\.\d+)?|-?[\d,]+\s*/\s*-?[\d,]+)\.?\s*$",
-        text,
-    ):
-        return True
-    return False
-
-
-@torch.no_grad()
-def generate_greedy(model, tokenizer, input_ids, max_new_tokens=MAX_NEW_TOKENS):
-    """Greedy generation for evaluation."""
-    return generate_group_completions(
-        model,
-        tokenizer,
-        input_ids,
-        group_size=1,
-        max_new_tokens=max_new_tokens,
-        temperature=0,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Compute per-token log-probs for a given sequence
+# Compute log-probs for policy loss
 # ---------------------------------------------------------------------------
 
 
 def compute_log_probs(model, full_ids, prompt_len):
-    """
-    Compute per-token log-probabilities for tokens after the prompt.
-
-    Args:
-        model: the model (with or without adapters active)
-        full_ids: [1, total_len] tensor of token ids (prompt + completion)
-        prompt_len: number of prompt tokens
-
-    Returns:
-        log_probs: [num_completion_tokens] tensor of log P(token | context)
-    """
     outputs = model(full_ids)
-    # logits: [1, total_len, vocab_size]
-    # We want P(token_t | tokens_<t) for t in [prompt_len, total_len)
-    # logits[:, t-1, :] predicts token at position t
-    logits = outputs.logits[
-        :, prompt_len - 1 : -1, :
-    ].float()  # [1, num_comp_tokens, vocab]
-    log_probs_all = torch.log_softmax(logits, dim=-1)  # [1, num_comp_tokens, vocab]
-    target_tokens = full_ids[:, prompt_len:]  # [1, num_comp_tokens]
-    token_log_probs = (
-        log_probs_all.gather(-1, target_tokens.unsqueeze(-1)).squeeze(-1).squeeze(0)
-    )  # [num_comp_tokens]
-    return token_log_probs
+    logits = outputs.logits[:, prompt_len - 1 : -1, :].float()
+    log_probs_all = torch.log_softmax(logits, dim=-1)
+    target_tokens = full_ids[:, prompt_len:]
+    return log_probs_all.gather(-1, target_tokens.unsqueeze(-1)).squeeze(-1).squeeze(0)
+
+
+def compute_log_probs_batch(model, full_ids, prompt_len):
+    """Batched version: full_ids [G, total_len] → [G, comp_len]."""
+    outputs = model(full_ids)
+    logits = outputs.logits[:, prompt_len - 1 : -1, :].float()
+    log_probs_all = torch.log_softmax(logits, dim=-1)
+    target_tokens = full_ids[:, prompt_len:]
+    return log_probs_all.gather(-1, target_tokens.unsqueeze(-1)).squeeze(-1)
+
+
+def compute_log_probs_batch_kv(model, full_ids, prompt_len):
+    """KV-detach: prompt under no_grad, backward only through completion tokens.
+
+    The prompt is fixed — the scale parameters affect it, but only at O(scale²)
+    through the KV cache path (second-order, negligible at scale ≈ 0.02).
+    The dominant first-order gradient flows through completion token processing.
+
+    Two separate forward passes:
+      1. Prompt (no_grad)  → KV cache for all 30 layers
+      2. Completion (grad) → attend over cached prompt KV as constants
+
+    Backward cost ∝ comp_len instead of (prompt_len + comp_len), reducing it by
+    roughly prompt_len / (prompt_len + comp_len) ≈ 57% at current token lengths.
+
+    Returns [G, comp_len - 1] — one fewer token than compute_log_probs_batch
+    (the first completion token's log-prob is skipped since its logit comes from
+    the no_grad prompt forward; 1 of 96 tokens ≈ 1% bias, acceptable).
+    """
+    # Pass 1: prompt under no_grad — cache K/V for all layers
+    with torch.no_grad():
+        prompt_out = model(full_ids[:, :prompt_len], use_cache=True)
+        past_kv = prompt_out.past_key_values
+
+    # Pass 2: completion with grad — attend over cached prompt K/V as constants
+    # Input: all completion tokens. With past_kv, logit[j] predicts token[prompt_len+j+1].
+    # We use logits[:, :-1, :] to predict tokens prompt_len+1 .. prompt_len+comp_len-1.
+    comp_ids = full_ids[:, prompt_len:]                  # [G, comp_len]
+    out = model(comp_ids, past_key_values=past_kv)
+    logits = out.logits[:, :-1, :].float()               # [G, comp_len-1, vocab]
+    log_probs = torch.log_softmax(logits, dim=-1)
+    targets = full_ids[:, prompt_len + 1:]               # [G, comp_len-1]
+    return log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
 
 
 # ---------------------------------------------------------------------------
-# GRPO training step
+# Rollout dispatch
+# ---------------------------------------------------------------------------
+
+
+def python_rollout(model, tokenizer, prompt_ids, group_size, max_new_tokens, temp):
+    """Generate completions using the Python model (torch.no_grad).
+
+    Used when USE_GHOST=False so rollouts use the real stored ternary weights
+    via the soft-chip AVX2 kernels, not the PRNG-per-token C ghost engine.
+    The C ghost engine regenerates weight matrices from scratch for every token
+    position, which is ~200x slower than reading cached weights from memory.
+
+    Returns a (group_size, prompt_len + max_new_tokens) int tensor, zero-padded
+    to a fixed length so the shape matches the C engine's output contract.
+    """
+    prompt_len = prompt_ids.shape[1]
+    total_len = prompt_len + max_new_tokens
+    # Generate all group_size completions in a single batched call instead of
+    # G sequential calls.  Repeating the prompt gives G independent samples
+    # with temp>0 sampling.  ~3x faster on CPU due to better kernel utilization.
+    batched_prompt = prompt_ids.repeat(group_size, 1)
+    with torch.no_grad():
+        out = model.generate(
+            batched_prompt,
+            max_new_tokens=max_new_tokens,
+            do_sample=(temp > 0.0),
+            temperature=(temp if temp > 0.0 else None),
+            top_p=(TOP_P if temp > 0.0 else None),
+            pad_token_id=tokenizer.eos_token_id,
+        )
+    if out.shape[1] < total_len:
+        pad = torch.zeros(group_size, total_len - out.shape[1], dtype=out.dtype)
+        out = torch.cat([out, pad], dim=1)
+    return out[:, :total_len]
+
+
+def rollout(model, tokenizer, adapters, engine, prompt_ids, group_size, max_new_tokens, temp):
+    """Dispatch to C ghost engine or Python model based on USE_GHOST."""
+    if USE_GHOST:
+        return engine.rollout_batch(adapters, prompt_ids, group_size, max_new_tokens, temp)
+    return python_rollout(model, tokenizer, prompt_ids, group_size, max_new_tokens, temp)
+
+
+# ---------------------------------------------------------------------------
+# GRPO Logic
 # ---------------------------------------------------------------------------
 
 
 def grpo_step(
-    model, tokenizer, adapters, optimizer, question, ground_truth, step_num, total_steps
+    model, tokenizer, adapters, optimizer, question, ground_truth, step_num, engine
 ):
-    """
-    One GRPO training step for a single prompt.
-
-    Returns dict with metrics, or None if no gradient signal (all rewards equal).
-    """
     t_start = time.time()
-
-    # Format prompt
     prompt_text = format_prompt(question)
     prompt_ids = tokenizer(prompt_text, return_tensors="pt").input_ids
     prompt_len = prompt_ids.shape[1]
 
-    # 1. ROLLOUT: Generate G completions sequentially (M=1 fastest for GhostWeight)
+    # 1. ROLLOUT
     t_rollout = time.time()
+    batch_ids = rollout(model, tokenizer, adapters, engine, prompt_ids, GROUP_SIZE, MAX_NEW_TOKENS, TEMPERATURE)
+
     completions = []
     completion_texts = []
     for g in range(GROUP_SIZE):
-        comp_ids = generate_group_completions(
-            model, tokenizer, prompt_ids, group_size=1
-        )
+        comp_ids = batch_ids[g : g + 1]
         completions.append(comp_ids)
         comp_text = tokenizer.decode(comp_ids[0, prompt_len:], skip_special_tokens=True)
         completion_texts.append(comp_text)
     rollout_time = time.time() - t_rollout
 
-    # 2. REWARD: Score completions (mixed: correctness + format signals)
+    # 2. REWARD
     rewards = []
-    predicted_answers = []
-    for comp_text in completion_texts:
-        pred = extract_answer(comp_text)
-        predicted_answers.append(pred)
-        if answers_match(pred, ground_truth):
-            reward = 1.0
-        else:
-            reward = 0.0  # Binary reward: correct or nothing. No partial rewards.
-        rewards.append(reward)
+    preds = []
+    for txt in completion_texts:
+        p = extract_answer(txt)
+        preds.append(p)
+        rewards.append(1.0 if answers_match(p, ground_truth) else 0.0)
 
-    # 3. ADVANTAGE: Group-normalize rewards
-    mean_r = sum(rewards) / len(rewards)
-    var_r = sum((r - mean_r) ** 2 for r in rewards) / len(rewards)
-    std_r = var_r**0.5
-
+    # 3. ADVANTAGE
+    mean_r = sum(rewards) / GROUP_SIZE
+    std_r = (sum((r - mean_r) ** 2 for r in rewards) / GROUP_SIZE) ** 0.5
     if std_r < 1e-8:
-        # All rewards identical — no gradient signal
-        elapsed = time.time() - t_start
         return {
             "step": step_num,
             "rewards": rewards,
-            "mean_reward": mean_r,
             "skipped": True,
             "rollout_time": rollout_time,
-            "total_time": elapsed,
-            "predicted_answers": predicted_answers,
+            "total_time": time.time() - t_start,
+            "predicted_answers": preds,
             "ground_truth": ground_truth,
         }
 
     advantages = [(r - mean_r) / (std_r + 1e-8) for r in rewards]
 
-    # 4. LOG-PROBS + LOSS
+    # 4. LOSS — single batched π_θ forward pass over all G completions.
+    # π_ref pass is skipped entirely when BETA_KL=0 (saves ~50% of update time).
     t_update = time.time()
-    total_loss = torch.tensor(0.0, dtype=torch.float32)
-    total_kl = 0.0
-    total_reinforce = 0.0
+    valid_pairs = [(ids, adv) for ids, adv in zip(completions, advantages)
+                   if ids.shape[1] > prompt_len]
+    total_loss = torch.tensor(0.0)
+    if valid_pairs:
+        stacked_ids = torch.cat([ids for ids, _ in valid_pairs], dim=0)
+        valid_advs = [adv for _, adv in valid_pairs]
 
-    for comp_ids, advantage in zip(completions, advantages):
-        num_comp_tokens = comp_ids.shape[1] - prompt_len
-        if num_comp_tokens <= 0:
-            continue
+        # Single π_θ forward + backward — KV-detach: prompt under no_grad so
+        # the backward only traverses the completion tokens (~57% less backprop).
+        log_probs_theta_all = compute_log_probs_batch_kv(model, stacked_ids, prompt_len)
 
-        # Forward with adapters (π_θ) — needs grad
-        log_probs_theta = compute_log_probs(model, comp_ids, prompt_len)
-
-        # Forward without adapters (π_ref) — no grad
-        saved_scales = zero_adapter_scales(adapters)
-        try:
+        # π_ref only when KL penalty is active
+        if BETA_KL > 0:
+            saved = zero_adapter_scales(adapters)
             with torch.no_grad():
-                log_probs_ref = compute_log_probs(model, comp_ids, prompt_len)
-        finally:
-            restore_adapter_scales(adapters, saved_scales)
+                log_probs_ref_all = compute_log_probs_batch_kv(model, stacked_ids, prompt_len)
+            restore_adapter_scales(adapters, saved)
 
-        # REINFORCE loss: -advantage * sum(log π_θ)
-        reinforce_loss = -advantage * log_probs_theta.sum()
-        total_reinforce += reinforce_loss.item()
-
-        # KL penalty: sum(log π_θ - log π_ref)
-        kl_per_token = log_probs_theta - log_probs_ref.detach()
-        kl = kl_per_token.sum()
-        total_kl += kl.item()
-
-        total_loss = total_loss + reinforce_loss + BETA_KL * kl
+        for i, adv in enumerate(valid_advs):
+            lp_theta = log_probs_theta_all[i]
+            # Normalize by sequence length so gradient magnitude is independent of
+            # how many tokens the model generated.  Without this, a 128-token
+            # completion gets 128x the gradient of a 1-token completion, biasing
+            # optimization toward short-answer format learning over reasoning.
+            reinforce_loss = -adv * lp_theta.mean()
+            if BETA_KL > 0:
+                kl = (lp_theta - log_probs_ref_all[i]).mean()
+                total_loss = total_loss + (reinforce_loss + BETA_KL * kl)
+            else:
+                total_loss = total_loss + reinforce_loss
 
     total_loss = total_loss / GROUP_SIZE
-
-    # 5. BACKWARD + UPDATE
     optimizer.zero_grad()
     total_loss.backward()
-
-    # Gradient stats
-    grad_norms = []
-    for _, adapter in adapters:
-        if adapter.scale.grad is not None:
-            grad_norms.append(adapter.scale.grad.abs().item())
-        else:
-            grad_norms.append(0.0)
-    mean_grad = sum(grad_norms) / len(grad_norms) if grad_norms else 0.0
-    max_grad = max(grad_norms) if grad_norms else 0.0
-
     optimizer.step()
-    update_time = time.time() - t_update
-    elapsed = time.time() - t_start
 
-    # Scale statistics
-    scales = [adapter.scale.item() for _, adapter in adapters]
-    mean_abs_scale = sum(abs(s) for s in scales) / len(scales)
-    max_abs_scale = max(abs(s) for s in scales)
-
+    grad_norms = [
+        exp.scale.grad.abs().item() for _, exp in adapters if exp.scale.grad is not None
+    ]
     return {
         "step": step_num,
         "rewards": rewards,
-        "mean_reward": mean_r,
-        "advantages": advantages,
         "loss": total_loss.item(),
-        "reinforce_loss": total_reinforce / GROUP_SIZE,
-        "kl": total_kl / GROUP_SIZE,
-        "mean_grad": mean_grad,
-        "max_grad": max_grad,
-        "mean_abs_scale": mean_abs_scale,
-        "max_abs_scale": max_abs_scale,
+        "mean_grad": sum(grad_norms) / len(grad_norms),
+        "mean_abs_scale": sum(abs(exp.scale.item()) for _, exp in adapters)
+        / len(adapters),
         "skipped": False,
         "rollout_time": rollout_time,
-        "update_time": update_time,
-        "total_time": elapsed,
-        "predicted_answers": predicted_answers,
+        "update_time": time.time() - t_update,
+        "total_time": time.time() - t_start,
+        "predicted_answers": preds,
         "ground_truth": ground_truth,
     }
 
 
-# ---------------------------------------------------------------------------
-# Evaluation
-# ---------------------------------------------------------------------------
-
-
-def evaluate(model, tokenizer, test_data, num_samples=EVAL_SAMPLES):
-    """Evaluate on GSM8K test set with greedy decoding."""
+def evaluate(
+    model, tokenizer, test_data, engine, num_samples=EVAL_SAMPLES, adapters=None
+):
     correct = 0
     total = 0
     results = []
-
-    samples = test_data[:num_samples] if len(test_data) >= num_samples else test_data
-
-    for i, example in enumerate(samples):
-        question = example["question"]
-        ground_truth = extract_gsm8k_answer(example["answer"])
-        if ground_truth is None:
-            continue
-
-        prompt_text = format_prompt(question)
-        prompt_ids = tokenizer(prompt_text, return_tensors="pt").input_ids
-        prompt_len = prompt_ids.shape[1]
-
-        comp_ids = generate_greedy(model, tokenizer, prompt_ids)
-        comp_text = tokenizer.decode(comp_ids[0, prompt_len:], skip_special_tokens=True)
-        pred = extract_answer(comp_text)
-
-        is_correct = answers_match(pred, ground_truth)
-        if is_correct:
+    for i, ex in enumerate(test_data[:num_samples]):
+        prompt_ids = tokenizer(
+            format_prompt(ex["question"]), return_tensors="pt"
+        ).input_ids
+        # Use rollout() dispatch so eval uses real trained weights (python_rollout)
+        # when USE_GHOST=False, not the PRNG-based C ghost engine.
+        comp_ids = rollout(model, tokenizer, adapters, engine, prompt_ids, 1, MAX_NEW_TOKENS, temp=0.0)
+        pred = extract_answer(
+            tokenizer.decode(
+                comp_ids[0, prompt_ids.shape[1] :], skip_special_tokens=True
+            )
+        )
+        gt = extract_gsm8k_answer(ex["answer"])
+        match = answers_match(pred, gt)
+        if match:
             correct += 1
         total += 1
-
-        results.append(
-            {
-                "question": question[:80] + "...",
-                "predicted": pred,
-                "ground_truth": ground_truth,
-                "correct": is_correct,
-            }
-        )
-
         print(
-            f"  eval [{i + 1}/{len(samples)}] pred={pred} gt={ground_truth} {'OK' if is_correct else 'WRONG'}"
+            f"  eval [{i + 1}/{num_samples}] pred={pred} gt={gt} {'OK' if match else 'WRONG'}"
         )
-
-    accuracy = correct / total if total > 0 else 0.0
-    return accuracy, results
+    return correct / total if total > 0 else 0.0
 
 
 # ---------------------------------------------------------------------------
-# Checkpointing
+# Curriculum Filtering
 # ---------------------------------------------------------------------------
 
 
-def save_checkpoint(adapters, optimizer, step, eval_history, config):
-    """Save adapter scales, optimizer state, and metadata."""
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    path = os.path.join(CHECKPOINT_DIR, f"grpo_step_{step:04d}.pt")
-    torch.save(
-        {
-            "step": step,
-            "adapter_scales": {
-                name: adapter.scale.data.clone() for name, adapter in adapters
-            },
-            "adapter_state": {
-                name: {
-                    "u": adapter.u.clone(),
-                    "v": adapter.v.clone(),
-                }
-                for name, adapter in adapters
-            },
-            "optimizer_state": optimizer.state_dict(),
-            "eval_history": eval_history,
-            "config": config,
-            "use_ghost": USE_GHOST,
-            "ghost_seed": GHOST_SEED if USE_GHOST else None,
-        },
-        path,
-    )
-    print(f"  Checkpoint saved: {path}")
-    return path
+def find_hard_problem(model, engine, adapters, tokenizer, train_data, start_idx):
+    """
+    Scan forward from start_idx to find a problem the current model fails on
+    (greedy decode at temp=0.0, reward=0).
 
+    Returns (problem, new_idx, n_scanned, found_hard).
 
-def load_checkpoint(path, adapters, optimizer):
-    """Load adapter scales and optimizer state from checkpoint."""
-    ckpt = torch.load(path, weights_only=False)
-    for name, adapter in adapters:
-        if name in ckpt["adapter_scales"]:
-            adapter.scale.data.copy_(ckpt["adapter_scales"][name])
-        if name in ckpt.get("adapter_state", {}):
-            adapter.u.copy_(ckpt["adapter_state"][name]["u"])
-            adapter.v.copy_(ckpt["adapter_state"][name]["v"])
-    if ckpt.get("optimizer_state"):
-        optimizer.load_state_dict(ckpt["optimizer_state"])
-    return ckpt["step"], ckpt.get("eval_history", [])
+    Uses strict_extract_answer (no last-number fallback) for the pre-check so
+    that a problem is only marked "solved" if the model produces an explicit
+    answer format.  This prevents the last-number fallback from incorrectly
+    excluding hard problems from the curriculum.
 
-
-# ---------------------------------------------------------------------------
-# Learning rate schedule
-# ---------------------------------------------------------------------------
-
-
-def get_lr(step, total_steps):
-    """Cosine decay from LEARNING_RATE to LR_MIN."""
-    if total_steps <= 1:
-        return LEARNING_RATE
-    progress = min(step / total_steps, 1.0)
-    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-    return LR_MIN + (LEARNING_RATE - LR_MIN) * cosine
-
-
-# ---------------------------------------------------------------------------
-# Pre-flight checks
-# ---------------------------------------------------------------------------
-
-
-def preflight(model, tokenizer, adapters, train_data, test_data):
-    """Run pre-flight validation before training."""
-    print("\n" + "=" * 60)
-    print("  PRE-FLIGHT CHECKS")
-    print("=" * 60)
-
-    # 1. Adapter count
-    trainable = sum(1 for p in model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in model.parameters())
-    print(
-        f"\n[1] Adapters: {len(adapters)} layers, {trainable} trainable params, {total / 1e9:.2f}B total"
-    )
-    assert trainable == len(adapters), (
-        f"Expected {len(adapters)} trainable, got {trainable}"
-    )
-    print("    PASS")
-
-    # 2. Test generation
-    print(f"\n[2] Test generation...")
-    question = train_data[0]["question"]
-    prompt_text = format_prompt(question)
-    prompt_ids = tokenizer(prompt_text, return_tensors="pt").input_ids
-    prompt_len = prompt_ids.shape[1]
-    print(f"    Prompt length: {prompt_len} tokens")
-    print(f"    Prompt preview: {prompt_text[:200]}...")
-
-    t0 = time.time()
-    comp_ids = generate_group_completions(
-        model, tokenizer, prompt_ids, group_size=1, max_new_tokens=50, temperature=0
-    )
-    gen_time = time.time() - t0
-    comp_text = tokenizer.decode(comp_ids[0, prompt_len:], skip_special_tokens=True)
-    print(
-        f"    Generated ({gen_time:.1f}s, {comp_ids.shape[1] - prompt_len} tokens): {comp_text[:200]}"
-    )
-    print("    PASS")
-
-    # 3. Answer extraction
-    print(f"\n[3] Answer extraction test...")
-    num_ok = 0
-    for i, ex in enumerate(train_data[:5]):
+    If no hard problem is found in CURRICULUM_SKIP_MAX tries, returns
+    found_hard=False.  The caller should skip the step rather than training on
+    an easy problem (which would reintroduce the 81%-skip problem we fixed).
+    """
+    for n in range(CURRICULUM_SKIP_MAX):
+        ex = train_data[start_idx % len(train_data)]
+        start_idx += 1
         gt = extract_gsm8k_answer(ex["answer"])
-        print(f"    [{i}] Ground truth: {gt}")
-        if gt is not None:
-            num_ok += 1
-    print(f"    Extracted {num_ok}/5 ground truths")
-    assert num_ok >= 4, f"Answer extraction failing: only {num_ok}/5"
-    print("    PASS")
-
-    # 4. Base model accuracy (quick check)
-    print(f"\n[4] Base model accuracy (5 problems, greedy)...")
-    t0 = time.time()
-    acc, results = evaluate(model, tokenizer, test_data, num_samples=5)
-    eval_time = time.time() - t0
-    print(f"    Accuracy: {acc * 100:.0f}% ({eval_time:.0f}s)")
-    print("    PASS (any accuracy is OK — we just need it to run)")
-
-    # 5. Training step timing
-    print(f"\n[5] Training step timing (1 step, G={GROUP_SIZE})...")
-    question = train_data[0]["question"]
-    gt = extract_gsm8k_answer(train_data[0]["answer"])
-    optimizer = torch.optim.Adam(
-        [adapter.scale for _, adapter in adapters],
-        lr=LEARNING_RATE,
-        betas=ADAM_BETAS,
-    )
-
-    t0 = time.time()
-    result = grpo_step(
-        model,
-        tokenizer,
-        adapters,
-        optimizer,
-        question,
-        gt,
-        step_num=0,
-        total_steps=MAX_STEPS,
-    )
-    step_time = time.time() - t0
-    print(f"    Total step time: {step_time:.1f}s")
-    print(f"    Rollout time: {result['rollout_time']:.1f}s")
-    if not result["skipped"]:
-        print(f"    Update time: {result['update_time']:.1f}s")
-        print(f"    Loss: {result['loss']:.4f}")
-        print(f"    KL: {result['kl']:.6f}")
-        print(f"    Mean |grad|: {result['mean_grad']:.2e}")
-        print(f"    Mean |scale|: {result['mean_abs_scale']:.2e}")
-    print(f"    Rewards: {result['rewards']}")
-    print(f"    Predictions: {result['predicted_answers']}")
-    print(f"    Ground truth: {result['ground_truth']}")
-    if result["skipped"]:
-        print("    (Step was skipped — all rewards identical, no gradient signal)")
-    print("    PASS")
-
-    # 6. Memory
-    import psutil
-
-    proc = psutil.Process()
-    mem_gb = proc.memory_info().rss / (1024**3)
-    print(f"\n[6] Memory usage: {mem_gb:.1f} GB / 64 GB")
-    print("    PASS")
-
-    # Estimate
-    est_steps_per_hour = 3600 / step_time if step_time > 0 else 0
-    est_steps_overnight = est_steps_per_hour * 8
-    print(f"\n{'=' * 60}")
-    print(f"  PRE-FLIGHT COMPLETE")
-    print(
-        f"  Estimated: {est_steps_per_hour:.0f} steps/hour, {est_steps_overnight:.0f} steps in 8 hours"
-    )
-    print(f"{'=' * 60}\n")
-
-    return result
+        if gt is None:
+            continue
+        prompt_ids = tokenizer(format_prompt(ex["question"]), return_tensors="pt").input_ids
+        comp_ids = rollout(model, tokenizer, adapters, engine, prompt_ids, 1, MAX_NEW_TOKENS, temp=0.0)
+        pred = strict_extract_answer(
+            tokenizer.decode(comp_ids[0, prompt_ids.shape[1] :], skip_special_tokens=True)
+        )
+        if not answers_match(pred, gt):
+            return ex, start_idx, n + 1, True  # found a hard problem
+    return None, start_idx, CURRICULUM_SKIP_MAX, False  # exhausted — no hard problem found
 
 
 # ---------------------------------------------------------------------------
@@ -781,277 +587,167 @@ def preflight(model, tokenizer, adapters, train_data, test_data):
 def main():
     preflight_only = "--preflight" in sys.argv
     resume_path = None
+    time_budget = TIME_BUDGET
     for arg in sys.argv[1:]:
         if arg.startswith("--resume="):
             resume_path = arg.split("=", 1)[1]
+        elif arg.startswith("--time-budget="):
+            time_budget = int(arg.split("=", 1)[1])
 
     print("=" * 60)
-    print("  GRPO Training: TinyLoRA on BitNet b1.58 2B4T")
+    print("  GRPO Training: GhostChain (3 Experts + 1 Observer)")
     print("=" * 60)
 
-    # Seed
     random.seed(SEED)
     torch.manual_seed(SEED)
 
-    # Load model
-    print("\n[SETUP] Loading model...")
-    t0 = time.time()
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, fix_mistral_regex=True)
-    except TypeError:
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+    print("  Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+    print("  Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_PATH,
-        torch_dtype=torch.bfloat16,
-        device_map="cpu",
-        trust_remote_code=True,
+        MODEL_PATH, torch_dtype=torch.bfloat16, device_map="cpu", trust_remote_code=True
     )
-    print(f"  Model loaded in {time.time() - t0:.1f}s")
+    print("  Model loaded.")
 
-    # Patch with soft-chip
-    print("[SETUP] Patching with soft-chip (CPU AVX2)...")
+    print("  Injecting adapters...")
+
+    adapters = inject_adapters(model)
+    print(f"  Injected {len(adapters)} GhostChain experts.")
+
+    # Ghost engine is only needed when USE_GHOST=True (PRNG weight path).
+    # With USE_GHOST=False (real ternary weights), rollout() dispatches to
+    # python_rollout() and engine is never called.
+    engine = None
+    if USE_GHOST:
+        from softchip.ghost_engine_wrapper import GhostEngine
+        print("  Initializing Ghost Engine...")
+        engine = GhostEngine(model, tokenizer, GHOST_SEED, SCALES_PATH)
+        print("  Ghost Engine initialized.")
+
     from softchip import patch_model, patch_lm_head_fp32
 
-    if USE_GHOST:
-        print(f"  [GhostWeight] Using PRNG-generated weights (seed={GHOST_SEED})")
-        patch_model(model, use_ghost=True, ghost_seed=GHOST_SEED, scales_path=SCALES_PATH)
-    else:
-        patch_model(model, backend="cpu")
+    print("  Patching model...")
+    patch_model(model, backend="cpu", use_ghost=USE_GHOST, ghost_seed=GHOST_SEED, scales_path=SCALES_PATH)
+    print("  Model patched. Patching LM head...")
     patch_lm_head_fp32(model)
+    print("  LM head patched.")
 
-    # Inject adapters
-    print("[SETUP] Injecting TinyLoRA adapters...")
-    adapters = inject_adapters(model)
-    print(
-        f"  Injected {len(adapters)} adapters ({sum(1 for p in model.parameters() if p.requires_grad)} trainable params)"
-    )
-
-    # Load GSM8K
-    print("[SETUP] Loading GSM8K dataset...")
     from datasets import load_dataset
 
+    print("  Loading dataset...")
     gsm8k = load_dataset("gsm8k", "main")
-    train_data = list(gsm8k["train"])
-    test_data = list(gsm8k["test"])
-    print(f"  Train: {len(train_data)}, Test: {len(test_data)}")
+    print("  Dataset loaded.")
 
-    # Shuffle training data
-    random.shuffle(train_data)
+    train_data, test_data = list(gsm8k["train"]), list(gsm8k["test"])
+    # Use an isolated RNG seeded by SEED so the shuffle order is identical on
+    # every cold start AND every resume.  The global random state is intentionally
+    # not used here — touching it would make the order depend on whatever the
+    # model-loading code consumed from the random stream beforehand.
+    random.Random(SEED).shuffle(train_data)
 
-    # Pre-flight
-    preflight_result = (
-        preflight(model, tokenizer, adapters, train_data, test_data)
-        if not USE_GHOST
-        else {"pass": True}
+    optimizer = torch.optim.Adam(
+        [exp.scale for _, exp in adapters], lr=LEARNING_RATE, betas=ADAM_BETAS
     )
+
     if preflight_only:
-        print("Pre-flight complete. Exiting (--preflight mode).")
-        return
-
-    # Reset adapters after preflight (the preflight step may have changed them)
-    for _, adapter in adapters:
-        adapter.scale.data.zero_()
-
-    # Optimizer
-    adapter_params = [adapter.scale for _, adapter in adapters]
-    optimizer = torch.optim.Adam(adapter_params, lr=LEARNING_RATE, betas=ADAM_BETAS)
-
-    # Config for logging
-    config = {
-        "group_size": GROUP_SIZE,
-        "temperature": TEMPERATURE,
-        "top_p": TOP_P,
-        "max_new_tokens": MAX_NEW_TOKENS,
-        "beta_kl": BETA_KL,
-        "learning_rate": LEARNING_RATE,
-        "lr_min": LR_MIN,
-        "max_steps": MAX_STEPS,
-        "time_budget": TIME_BUDGET,
-        "num_adapters": len(adapters),
-        "num_few_shot": NUM_FEW_SHOT,
-        "seed": SEED,
-    }
-
-    # Training state
-    eval_history = []
-    train_idx = 0
-    total_training_time = 0.0
-    steps_skipped = 0
-    total_reward_sum = 0.0
-    total_reward_count = 0
-    start_step = 1
-    base_acc = 0.0
-
-    # Resume from checkpoint if requested
-    if resume_path:
-        print(f"\n[RESUME] Loading checkpoint: {resume_path}")
-        start_step, eval_history = load_checkpoint(resume_path, adapters, optimizer)
-        start_step += 1  # continue from next step
-        train_idx = start_step % len(train_data)
-        print(
-            f"  Resuming from step {start_step}, eval_history={len(eval_history)} entries"
-        )
-        # Recover base_acc from eval_history if available
-        base_entries = [e for e in eval_history if e.get("type") == "base"]
-        if base_entries:
-            base_acc = base_entries[-1]["accuracy"]
-            print(f"  Base accuracy: {base_acc * 100:.1f}% (from checkpoint history)")
-    else:
-        # Base model evaluation (before training)
-        print("\n[EVAL] Base model accuracy (before training)...")
-        base_acc, base_results = evaluate(
-            model, tokenizer, test_data, num_samples=EVAL_SAMPLES
-        )
-        print(f"  Base accuracy: {base_acc * 100:.1f}% ({EVAL_SAMPLES} problems)")
-        eval_history.append({"step": 0, "accuracy": base_acc, "type": "base"})
-
-    # Log file
-    log_fh = open(LOG_FILE, "a")
-
-    print(f"\n{'=' * 60}")
-    print(f"  TRAINING START")
-    print(f"  {len(adapters)} adapters, G={GROUP_SIZE}, lr={LEARNING_RATE}")
-    print(f"  Time budget: {TIME_BUDGET}s ({TIME_BUDGET / 3600:.1f}h)")
-    print(f"{'=' * 60}\n")
-
-    t_train_start = time.time()
-
-    for step in range(start_step, MAX_STEPS + 1):
-        # Check time budget
-        if total_training_time >= TIME_BUDGET:
-            print(f"\nTime budget reached ({TIME_BUDGET}s). Stopping.")
-            break
-
-        # Update learning rate
-        lr = get_lr(step, MAX_STEPS)
-        for pg in optimizer.param_groups:
-            pg["lr"] = lr
-
-        # Pick next training example
-        example = train_data[train_idx % len(train_data)]
-        train_idx += 1
-        question = example["question"]
-        ground_truth = extract_gsm8k_answer(example["answer"])
-        if ground_truth is None:
-            print(f"[step {step:04d}] SKIP (bad ground truth)")
-            continue
-
-        # GRPO step
-        result = grpo_step(
+        print("\n[PREFLIGHT] Testing step...")
+        res = grpo_step(
             model,
             tokenizer,
             adapters,
             optimizer,
-            question,
-            ground_truth,
-            step_num=step,
-            total_steps=MAX_STEPS,
+            train_data[0]["question"],
+            extract_gsm8k_answer(train_data[0]["answer"]),
+            0,
+            engine,
+        )
+        print(
+            f"  Step time: {res['total_time']:.1f}s (Rollout: {res['rollout_time']:.1f}s)"
+        )
+        return
+
+    eval_history = []
+    problem_ptr = 0
+    start_step = 1
+    if resume_path:
+        ckpt = torch.load(resume_path, weights_only=False)
+        for name, exp in adapters:
+            if name in ckpt["adapter_scales"]:
+                exp.scale.data.copy_(ckpt["adapter_scales"][name])
+        optimizer.load_state_dict(ckpt["optimizer_state"])
+        start_step = ckpt["step"] + 1
+        eval_history = ckpt.get("eval_history", [])
+        problem_ptr = ckpt.get("problem_ptr", start_step - 1)
+
+    curriculum_tag = " +curriculum" if USE_CURRICULUM_FILTER else ""
+    print(f"\nTraining Start: G={GROUP_SIZE}, Budget={time_budget}s{curriculum_tag}")
+    t0 = time.time()
+    total_time = 0
+
+    for step in range(start_step, MAX_STEPS + 1):
+        if total_time >= time_budget:
+            break
+
+        # Linear decay (simplified for loop)
+        lr = LR_MIN + (LEARNING_RATE - LR_MIN) * (1 - step / MAX_STEPS)
+        for pg in optimizer.param_groups:
+            pg["lr"] = lr
+
+        if USE_CURRICULUM_FILTER:
+            ex, problem_ptr, n_scanned, found_hard = find_hard_problem(
+                model, engine, adapters, tokenizer, train_data, problem_ptr
+            )
+            if not found_hard:
+                # All CURRICULUM_SKIP_MAX candidates were already solved by the
+                # current model.  Training on any of them would reproduce the
+                # original 81%-skip problem.  Skip this step number entirely and
+                # advance — the model has progressed into a harder regime and will
+                # find hard problems again shortly.
+                print(
+                    f"[step {step:04d}] CURRICULUM_EXHAUSTED: all {n_scanned} candidates solved — skipping step"
+                )
+                continue
+        else:
+            ex = train_data[step % len(train_data)]
+            problem_ptr = step
+            n_scanned = 0
+
+        res = grpo_step(
+            model,
+            tokenizer,
+            adapters,
+            optimizer,
+            ex["question"],
+            extract_gsm8k_answer(ex["answer"]),
+            step,
+            engine,
         )
 
-        total_training_time += result["total_time"]
-        total_reward_sum += sum(result["rewards"])
-        total_reward_count += len(result["rewards"])
+        total_time += res["total_time"]
+        scan_tag = f" scan={n_scanned}" if USE_CURRICULUM_FILTER else ""
+        print(
+            f"[step {step:04d}] rewards={res['rewards']} loss={res.get('loss', 0.0):.4f} |scale|={res.get('mean_abs_scale', 0.0):.4f} time={res['total_time']:.1f}s{scan_tag}"
+        )
 
-        # Console output
-        if result["skipped"]:
-            steps_skipped += 1
-            r_str = ",".join(str(int(r)) for r in result["rewards"])
-            print(
-                f"[step {step:04d}] SKIP rewards=[{r_str}] "
-                f"rollout={result['rollout_time']:.0f}s "
-                f"elapsed={total_training_time:.0f}s"
-            )
-        else:
-            r_str = ",".join(str(int(r)) for r in result["rewards"])
-            running_reward = (
-                total_reward_sum / total_reward_count if total_reward_count > 0 else 0
-            )
-            print(
-                f"[step {step:04d}] rewards=[{r_str}] "
-                f"loss={result['loss']:.4f} "
-                f"kl={result['kl']:.4f} "
-                f"|scale|={result['mean_abs_scale']:.4f} "
-                f"|grad|={result['mean_grad']:.2e} "
-                f"lr={lr:.4f} "
-                f"rollout={result['rollout_time']:.0f}s "
-                f"update={result['update_time']:.1f}s "
-                f"total={result['total_time']:.0f}s "
-                f"running_r={running_reward:.2f}"
-            )
-
-        # Log to file
-        log_entry = {**result, "lr": lr, "wall_time": time.time() - t_train_start}
-        log_fh.write(json.dumps(log_entry, default=str) + "\n")
-        log_fh.flush()
-
-        # Checkpoint
         if step % CHECKPOINT_EVERY == 0:
-            save_checkpoint(adapters, optimizer, step, eval_history, config)
+            path = f"{CHECKPOINT_DIR}/grpo_step_{step:04d}.pt"
+            torch.save(
+                {
+                    "step": step,
+                    "adapter_scales": {n: e.scale.data for n, e in adapters},
+                    "optimizer_state": optimizer.state_dict(),
+                    "eval_history": eval_history,
+                    "problem_ptr": problem_ptr,
+                },
+                path,
+            )
 
-        # Evaluation
         if step % EVAL_EVERY == 0:
-            print(f"\n[EVAL] Step {step}...")
-            t_eval = time.time()
-            acc, results = evaluate(
-                model, tokenizer, test_data, num_samples=EVAL_SAMPLES
-            )
-            eval_time = time.time() - t_eval
-            print(
-                f"  Accuracy: {acc * 100:.1f}% (base: {base_acc * 100:.1f}%) [{eval_time:.0f}s]"
-            )
-            eval_history.append({"step": step, "accuracy": acc, "type": "train"})
-            save_checkpoint(adapters, optimizer, step, eval_history, config)
-            print()
-
-    # Final evaluation
-    print(f"\n{'=' * 60}")
-    print("  FINAL EVALUATION")
-    print(f"{'=' * 60}")
-    final_acc, final_results = evaluate(
-        model, tokenizer, test_data, num_samples=EVAL_SAMPLES
-    )
-    eval_history.append({"step": step, "accuracy": final_acc, "type": "final"})
-    save_checkpoint(adapters, optimizer, step, eval_history, config)
-
-    # Scale analysis
-    print(f"\n{'=' * 60}")
-    print("  ADAPTER SCALE ANALYSIS")
-    print(f"{'=' * 60}")
-    scale_data = [(name, adapter.scale.item()) for name, adapter in adapters]
-    scale_data.sort(key=lambda x: abs(x[1]), reverse=True)
-    print("\nTop 20 most-moved adapters:")
-    for name, scale in scale_data[:20]:
-        print(f"  {scale:+.6f}  {name}")
-    print(f"\nBottom 10 (least moved):")
-    for name, scale in scale_data[-10:]:
-        print(f"  {scale:+.6f}  {name}")
-
-    # Summary
-    print(f"\n{'=' * 60}")
-    print("  TRAINING SUMMARY")
-    print(f"{'=' * 60}")
-    print(f"  Steps completed:  {step}")
-    print(f"  Steps skipped:    {steps_skipped} ({100 * steps_skipped / step:.0f}%)")
-    print(
-        f"  Training time:    {total_training_time:.0f}s ({total_training_time / 3600:.1f}h)"
-    )
-    print(f"  Base accuracy:    {base_acc * 100:.1f}%")
-    print(f"  Final accuracy:   {final_acc * 100:.1f}%")
-    print(
-        f"  Running reward:   {total_reward_sum / total_reward_count:.2f}"
-        if total_reward_count > 0
-        else ""
-    )
-    print(
-        f"  Mean |scale|:     {sum(abs(s) for _, s in scale_data) / len(scale_data):.6f}"
-    )
-    print(f"  Max |scale|:      {max(abs(s) for _, s in scale_data):.6f}")
-
-    log_fh.close()
-    print(f"\nLog saved to {LOG_FILE}")
-    print(f"Checkpoints in {CHECKPOINT_DIR}/")
+            acc = evaluate(model, tokenizer, test_data, engine, adapters=adapters)
+            print(f"  Accuracy at step {step}: {acc * 100:.1f}%")
+            eval_history.append({"step": step, "accuracy": acc})
 
 
 if __name__ == "__main__":

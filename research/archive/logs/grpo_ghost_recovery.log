@@ -1,0 +1,30 @@
+============================================================
+  GRPO Training: TinyLoRA on BitNet b1.58 2B4T
+============================================================
+
+[SETUP] Loading model...
+The tokenizer you are loading from 'models/bitnet-b1.58-2B-4T-bf16' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+`torch_dtype` is deprecated! Use `dtype` instead!
+You don't have a GPU available to load the model, the inference will be slow because of weight unpacking
+Loading weights:   0%|          | 0/332 [00:00<?, ?it/s]Loading weights: 100%|██████████| 332/332 [00:00<00:00, 7570.78it/s]
+  Model loaded in 7.6s
+[SETUP] Patching with soft-chip (CPU AVX2)...
+  [GhostWeight] Using PRNG-generated weights (seed=42)
+Traceback (most recent call last):
+  File "/home/ztflynn/001/autoresearch/grpo_train.py", line 1059, in <module>
+    main()
+    ~~~~^^
+  File "/home/ztflynn/001/autoresearch/grpo_train.py", line 822, in main
+    patch_model(model, use_ghost=True, ghost_seed=GHOST_SEED)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ztflynn/001/autoresearch/softchip/torch_ternary.py", line 523, in patch_model
+    _ensure_ghost_lib()
+    ~~~~~~~~~~~~~~~~~^^
+  File "/home/ztflynn/001/autoresearch/softchip/torch_ternary.py", line 218, in _ensure_ghost_lib
+    _ghost_lib.ghost_warm_cache.argtypes = [
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ztflynn/miniconda3/lib/python3.13/ctypes/__init__.py", line 403, in __getattr__
+    func = self.__getitem__(name)
+  File "/home/ztflynn/miniconda3/lib/python3.13/ctypes/__init__.py", line 408, in __getitem__
+    func = self._FuncPtr((name_or_ordinal, self))
+AttributeError: /home/ztflynn/001/autoresearch/softchip/ghost_matmul.so: undefined symbol: ghost_warm_cache

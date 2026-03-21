@@ -1,0 +1,109 @@
+============================================================
+  GRPO Training: TinyLoRA on BitNet b1.58 2B4T
+============================================================
+
+[SETUP] Loading model...
+The tokenizer you are loading from 'models/bitnet-b1.58-2B-4T-bf16' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+`torch_dtype` is deprecated! Use `dtype` instead!
+You don't have a GPU available to load the model, the inference will be slow because of weight unpacking
+Loading weights:   0%|          | 0/332 [00:00<?, ?it/s]Loading weights: 100%|██████████| 332/332 [00:00<00:00, 4551.35it/s]
+  Model loaded in 10.3s
+[SETUP] Patching with soft-chip (CPU AVX2)...
+  [GhostWeight] Using PRNG-generated weights (seed=42)
+Soft-chip: using GhostWeight backend (seed=42)
+Soft-chip: patched 210 AutoBitLinear layers [GhostWeight]
+FP32 LM head: converting (128256, 2560) from torch.bfloat16 to float32 (1313 MB)
+FP32 LM head: patched successfully
+[SETUP] Injecting TinyLoRA adapters...
+  Injected 210 adapters (210 trainable params)
+[SETUP] Loading GSM8K dataset...
+  Train: 7473, Test: 1319
+
+[EVAL] Base model accuracy (before training)...
+  eval [1/20] pred=None gt=18 WRONG
+  eval [2/20] pred=None gt=3 WRONG
+  eval [3/20] pred=None gt=70000 WRONG
+  eval [4/20] pred=None gt=540 WRONG
+  eval [5/20] pred=92 gt=20 WRONG
+  eval [6/20] pred=None gt=64 WRONG
+  eval [7/20] pred=None gt=260 WRONG
+  eval [8/20] pred=None gt=160 WRONG
+  eval [9/20] pred=- gt=45 WRONG
+  eval [10/20] pred=None gt=460 WRONG
+  eval [11/20] pred=None gt=366 WRONG
+  eval [12/20] pred=None gt=694 WRONG
+  eval [13/20] pred=None gt=13 WRONG
+  eval [14/20] pred=None gt=18 WRONG
+  eval [15/20] pred=None gt=60 WRONG
+  eval [16/20] pred=None gt=125 WRONG
+  eval [17/20] pred=72 gt=230 WRONG
+  eval [18/20] pred=None gt=57500 WRONG
+  eval [19/20] pred=None gt=7 WRONG
+  eval [20/20] pred=None gt=6 WRONG
+  Base accuracy: 0.0% (20 problems)
+
+============================================================
+  TRAINING START
+  210 adapters, G=4, lr=0.01
+  Time budget: 28800s (8.0h)
+============================================================
+
+[step 0001] SKIP rewards=[0,0,0,0] rollout=764s elapsed=764s
+[step 0002] SKIP rewards=[0,0,0,0] rollout=731s elapsed=1496s
+[step 0003] SKIP rewards=[0,0,0,0] rollout=723s elapsed=2218s
+[step 0004] SKIP rewards=[0,0,0,0] rollout=776s elapsed=2995s
+[step 0005] SKIP rewards=[0,0,0,0] rollout=725s elapsed=3720s
+[step 0006] SKIP rewards=[0,0,0,0] rollout=718s elapsed=4438s
+[step 0007] SKIP rewards=[0,0,0,0] rollout=741s elapsed=5179s
+[step 0008] SKIP rewards=[0,0,0,0] rollout=727s elapsed=5906s
+[step 0009] SKIP rewards=[0,0,0,0] rollout=768s elapsed=6674s
+[step 0010] SKIP rewards=[0,0,0,0] rollout=768s elapsed=7443s
+  Checkpoint saved: checkpoints/grpo_step_0010.pt
+[step 0011] SKIP rewards=[0,0,0,0] rollout=721s elapsed=8164s
+[step 0012] SKIP rewards=[0,0,0,0] rollout=749s elapsed=8913s
+[step 0013] SKIP rewards=[0,0,0,0] rollout=739s elapsed=9653s
+[step 0014] SKIP rewards=[0,0,0,0] rollout=709s elapsed=10362s
+[step 0015] SKIP rewards=[0,0,0,0] rollout=756s elapsed=11118s
+[step 0016] SKIP rewards=[0,0,0,0] rollout=775s elapsed=11893s
+[step 0017] SKIP rewards=[0,0,0,0] rollout=756s elapsed=12649s
+[step 0018] SKIP rewards=[0,0,0,0] rollout=781s elapsed=13430s
+[step 0019] SKIP rewards=[0,0,0,0] rollout=767s elapsed=14197s
+[step 0020] SKIP rewards=[0,0,0,0] rollout=778s elapsed=14975s
+  Checkpoint saved: checkpoints/grpo_step_0020.pt
+[step 0021] SKIP rewards=[0,0,0,0] rollout=746s elapsed=15721s
+[step 0022] SKIP rewards=[0,0,0,0] rollout=773s elapsed=16494s
+[step 0023] SKIP rewards=[0,0,0,0] rollout=727s elapsed=17222s
+[step 0024] SKIP rewards=[0,0,0,0] rollout=711s elapsed=17933s
+[step 0025] SKIP rewards=[0,0,0,0] rollout=699s elapsed=18632s
+
+[EVAL] Step 25...
+  eval [1/20] pred=None gt=18 WRONG
+  eval [2/20] pred=None gt=3 WRONG
+  eval [3/20] pred=None gt=70000 WRONG
+  eval [4/20] pred=None gt=540 WRONG
+  eval [5/20] pred=92 gt=20 WRONG
+  eval [6/20] pred=None gt=64 WRONG
+  eval [7/20] pred=None gt=260 WRONG
+  eval [8/20] pred=None gt=160 WRONG
+  eval [9/20] pred=- gt=45 WRONG
+  eval [10/20] pred=None gt=460 WRONG
+  eval [11/20] pred=None gt=366 WRONG
+  eval [12/20] pred=None gt=694 WRONG
+  eval [13/20] pred=None gt=13 WRONG
+  eval [14/20] pred=None gt=18 WRONG
+  eval [15/20] pred=None gt=60 WRONG
+  eval [16/20] pred=None gt=125 WRONG
+  eval [17/20] pred=72 gt=230 WRONG
+  eval [18/20] pred=None gt=57500 WRONG
+  eval [19/20] pred=None gt=7 WRONG
+  eval [20/20] pred=None gt=6 WRONG
+  Accuracy: 0.0% (base: 0.0%) [3563s]
+  Checkpoint saved: checkpoints/grpo_step_0025.pt
+
+[step 0026] SKIP rewards=[0,0,0,0] rollout=715s elapsed=19347s
+[step 0027] SKIP rewards=[0,0,0,0] rollout=974s elapsed=20321s
+[step 0028] SKIP rewards=[0,0,0,0] rollout=938s elapsed=21258s
+[step 0029] SKIP rewards=[0,0,0,0] rollout=915s elapsed=22173s
+[step 0030] SKIP rewards=[0,0,0,0] rollout=762s elapsed=22935s
+  Checkpoint saved: checkpoints/grpo_step_0030.pt
+[step 0031] SKIP rewards=[0,0,0,0] rollout=829s elapsed=23764s
