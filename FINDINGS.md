@@ -1650,7 +1650,7 @@ The 1.6KB narrative for scalar adapters is preserved as a research finding, but 
 
 3. **LR schedule for LoRA:** LR=0.0174 with Adam worked for 15 pinned steps. Whether this is optimal for a 700-step curriculum-sampled run is unknown. Standard LoRA practice uses 1e-4 to 1e-3 for supervised fine-tuning; GRPO with large advantages may need higher LR.
 
-4. **The 3 unreachable questions (Q3, Q9, Q13):** These are ceiling questions for this model on this task. Q3 (gt=70000, Josh house flip) requires tracking $80,000 + \$50,000 - \$27,000 + \$70,000 = \$173,000... wait, no: buy for $80k, put in $50k, sell for $173k? profit = $173k - $80k - $50k = $43k? Hmm. The model generates numbers ranging from 130 to 19,670,000 — no consistent calculation path. This is likely a problem where the question involves large-number arithmetic that the 2B model cannot reliably compute.
+4. **The 3 unreachable questions (Q3, Q9, Q13):** These represent a hard floor regardless of adapter architecture. The model generates wildly inconsistent answers across 10 stochastic samples (Q3: 130 to 19,670,000; Q9: 4 to 395) — no coherent calculation path exists in the current model for these problems. GRPO cannot reinforce a correct path that never appears in rollouts.
 
 5. **Full LoRA run (8 hours):** The next step is `grpo_train.py` with LoRA rank-4 replacing GhostChain, LR=0.0174, curriculum token mismatch fixed, MAX_NEW_TOKENS=256.
 

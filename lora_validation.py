@@ -361,8 +361,8 @@ def main():
             return
         print(f"  Candidates for Phase 2: {[q['idx'] for q in solvable]}\n")
     else:
-        # phase2-only: assume all are solvable, pick best candidates manually
-        solvable = [q for q in locked_questions if q["idx"] in {6, 9, 20}]
+        # phase2-only: use Phase 1 confirmed solvable questions (Q9, Q13 are unreachable)
+        solvable = [q for q in locked_questions if q["idx"] in {5, 6, 20}]
 
     if phase1_only:
         return

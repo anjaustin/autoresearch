@@ -36,9 +36,9 @@ GROUP_SIZE = 4
 TEMPERATURE = 0.963
 TOP_P = 0.9
 MAX_NEW_TOKENS = 256
-CURRICULUM_MAX_TOKENS = 96   # token budget for curriculum pre-checks (shorter = faster scans)
-BETA_KL = 0.0  # GhostWeight: π_ref is random noise
-LEARNING_RATE = 0.01
+CURRICULUM_MAX_TOKENS = 256  # match training budget — mismatch caused 51% all-correct skips (Pass 17)
+BETA_KL = 0.0  # KL penalty disabled — no reference policy needed
+LEARNING_RATE = 0.0174  # validated in 15-step pinned LoRA test (Pass 17)
 LR_MIN = 0.001
 ADAM_BETAS = (0.9, 0.999)
 
@@ -217,93 +217,76 @@ def strict_extract_answer(text):
 
 
 # ---------------------------------------------------------------------------
-# GhostChain Adapter
+# LoRA Adapter (rank-4, trainable A and B — replaces GhostChain scalars)
+#
+# Validated in Pass 17: flipped 2 locked questions in 15 steps that 840
+# scalar adapters could not move in 225 steps.
+# Architecture: ΔW = B × A, both learned.  B init=0 → identity at step 0.
 # ---------------------------------------------------------------------------
 
-
-class GhostExpert(nn.Module):
-    def __init__(self, in_features, out_features, seed):
-        super().__init__()
-        gen = torch.Generator().manual_seed(seed % (2**63))
-        u = torch.randn(out_features, 1, generator=gen, dtype=torch.bfloat16)
-        v = torch.randn(1, in_features, generator=gen, dtype=torch.bfloat16)
-        self.register_buffer("u", u / u.norm())
-        self.register_buffer("v", v / v.norm())
-        self.scale = nn.Parameter(torch.zeros(1, dtype=torch.bfloat16))
-
-    def forward(self, x):
-        return (x @ self.v.T) @ self.u.T * self.scale
+LORA_RANK = 4  # rank-4 validated; rank-1 would be ~1.3M params (untested)
 
 
-class GhostChain(nn.Module):
-    def __init__(self, base_layer, seed=42):
+class LoRALayer(nn.Module):
+    def __init__(self, base_layer, rank, seed):
         super().__init__()
         self.base_layer = base_layer
-        out_features, in_features = base_layer.weight.shape
-        self.expert1 = GhostExpert(in_features, out_features, seed + 1)
-        self.expert2 = GhostExpert(in_features, out_features, seed + 2)
-        self.expert3 = GhostExpert(in_features, out_features, seed + 3)
-        self.observer = GhostExpert(in_features, out_features, seed + 4)
+        out_f, in_f = base_layer.weight.shape
+        gen = torch.Generator().manual_seed(seed % (2**63))
+        # A: projects input down to rank — scaled normal for stable initial gradients
+        A = torch.randn(rank, in_f, generator=gen, dtype=torch.bfloat16) / (in_f ** 0.5)
+        self.A = nn.Parameter(A)
+        # B: projects rank back up — zero init so adapter starts as identity
+        self.B = nn.Parameter(torch.zeros(out_f, rank, dtype=torch.bfloat16))
 
     def forward(self, x):
-        # All four experts read from the same input — parallel flat addition.
-        # This matches the C ghost engine's apply_experts_batched(), which always
-        # reads from the original normalized input for all 4 experts.  Serial
-        # coupling (feeding x+d1 into expert2, etc.) is mathematically equivalent
-        # to parallel at small scales in high dimension (orthogonality of random
-        # unit vectors in R^2560), and the C engine has no mechanism to pass
-        # intermediate outputs between experts anyway.  Keeping both sides parallel
-        # ensures the rollout model and the log-prob computation model are identical,
-        # which is required for a valid GRPO policy gradient.
-        d1 = self.expert1(x)
-        d2 = self.expert2(x)
-        d3 = self.expert3(x)
-        correction = self.observer(x)
-        return self.base_layer(x) + d1 + d2 + d3 + correction
+        base_out = self.base_layer(x)
+        lora_out = (x.float() @ self.A.T.float() @ self.B.T.float()).to(x.dtype)
+        return base_out + lora_out
 
 
 def inject_adapters(model):
-    """Attach GhostChain to all AutoBitLinear layers."""
+    """Attach LoRALayer (rank-4, trainable A+B) to all AutoBitLinear layers."""
     adapters = []
     modules_dict = dict(model.named_modules())
     for name, module in list(model.named_modules()):
         if module.__class__.__name__ != "AutoBitLinear":
             continue
-        seed = int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "big") % (
-            2**63
-        )
-        chain = GhostChain(module, seed=seed)
+        seed = int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "big")
+        lora = LoRALayer(module, rank=LORA_RANK, seed=seed)
         parts = name.rsplit(".", 1)
         if len(parts) == 2:
             parent_name, attr_name = parts
             parent = modules_dict[parent_name]
-            setattr(parent, attr_name, chain)
-            adapters.append((f"{name}.expert1", chain.expert1))
-            adapters.append((f"{name}.expert2", chain.expert2))
-            adapters.append((f"{name}.expert3", chain.expert3))
-            adapters.append((f"{name}.observer", chain.observer))
+            setattr(parent, attr_name, lora)
+            adapters.append((name, lora))
     for p in model.parameters():
         p.requires_grad = False
-    for _, exp in adapters:
-        exp.scale.requires_grad = True
+    for _, lora in adapters:
+        lora.A.requires_grad = True
+        lora.B.requires_grad = True
+    total = sum(p.numel() for _, l in adapters for p in [l.A, l.B])
+    print(f"  LoRA rank-{LORA_RANK}: {len(adapters)} layers, {total:,} trainable params")
     return adapters
 
 
-def get_adapter_scales(adapters):
-    return {name: exp.scale.item() for name, exp in adapters}
+def get_adapter_norms(adapters):
+    """Return dict of per-adapter Frobenius norm of B (proxy for adaptation magnitude)."""
+    return {name: lora.B.data.norm().item() for name, lora in adapters}
 
 
 def zero_adapter_scales(adapters):
+    """Zero B matrices for π_ref computation (used when BETA_KL > 0)."""
     saved = []
-    for _, exp in adapters:
-        saved.append(exp.scale.data.clone())
-        exp.scale.data.zero_()
+    for _, lora in adapters:
+        saved.append(lora.B.data.clone())
+        lora.B.data.zero_()
     return saved
 
 
 def restore_adapter_scales(adapters, saved):
-    for (_, exp), val in zip(adapters, saved):
-        exp.scale.data.copy_(val)
+    for (_, lora), val in zip(adapters, saved):
+        lora.B.data.copy_(val)
 
 
 # ---------------------------------------------------------------------------
@@ -495,16 +478,19 @@ def grpo_step(
     total_loss.backward()
     optimizer.step()
 
-    grad_norms = [
-        exp.scale.grad.abs().item() for _, exp in adapters if exp.scale.grad is not None
-    ]
+    grad_norms = []
+    for _, lora in adapters:
+        if lora.B.grad is not None:
+            grad_norms.append(lora.B.grad.norm().item())
+        if lora.A.grad is not None:
+            grad_norms.append(lora.A.grad.norm().item())
+    mean_b_norm = sum(lora.B.data.norm().item() for _, lora in adapters) / len(adapters)
     return {
         "step": step_num,
         "rewards": rewards,
         "loss": total_loss.item(),
-        "mean_grad": sum(grad_norms) / len(grad_norms),
-        "mean_abs_scale": sum(abs(exp.scale.item()) for _, exp in adapters)
-        / len(adapters),
+        "mean_grad": sum(grad_norms) / len(grad_norms) if grad_norms else 0.0,
+        "mean_abs_scale": mean_b_norm,  # repurposed: Frobenius norm of B (starts at 0)
         "skipped": False,
         "rollout_time": rollout_time,
         "update_time": time.time() - t_update,
@@ -677,7 +663,8 @@ def main():
     random.Random(SEED).shuffle(train_data)
 
     optimizer = torch.optim.Adam(
-        [exp.scale for _, exp in adapters], lr=LEARNING_RATE, betas=ADAM_BETAS
+        [p for _, lora in adapters for p in [lora.A, lora.B]],
+        lr=LEARNING_RATE, betas=ADAM_BETAS
     )
 
     if preflight_only:
@@ -702,9 +689,12 @@ def main():
     start_step = 1
     if resume_path:
         ckpt = torch.load(resume_path, weights_only=False)
-        for name, exp in adapters:
-            if name in ckpt["adapter_scales"]:
-                exp.scale.data.copy_(ckpt["adapter_scales"][name])
+        for name, lora in adapters:
+            if name in ckpt.get("adapter_scales", {}):
+                d = ckpt["adapter_scales"][name]
+                if isinstance(d, dict):
+                    lora.A.data.copy_(d["A"])
+                    lora.B.data.copy_(d["B"])
         optimizer.load_state_dict(ckpt["optimizer_state"])
         start_step = ckpt["step"] + 1
         eval_history = ckpt.get("eval_history", [])
@@ -765,7 +755,7 @@ def main():
             torch.save(
                 {
                     "step": step,
-                    "adapter_scales": {n: e.scale.data for n, e in adapters},
+                    "adapter_scales": {n: {"A": l.A.data, "B": l.B.data} for n, l in adapters},
                     "optimizer_state": optimizer.state_dict(),
                     "eval_history": eval_history,
                     "problem_ptr": problem_ptr,
