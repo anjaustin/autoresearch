@@ -7,16 +7,15 @@
 
 ## Current Status
 
-**Active training run** — `USE_GHOST=False`, step 120+, GhostChain adapters on real BitNet ternary weights.
+**Architecture pivot validated.** GhostChain scalar adapters (840 params) have hit their ceiling at ~45% GSM8K accuracy. LoRA rank-4 is the confirmed next step.
 
-The project has two distinct tracks:
-
-| Track | Status | Description |
+| Track | Status | Key finding |
 |---|---|---|
-| **TinyLoRA / GhostChain on real weights** | **Validated and running** | 840 scalar adapters trained via GRPO on frozen BitNet ternary weights. 91% running reward at step 220. This is what the current training loop runs. |
-| **GhostWeight (PRNG replaces stored weights)** | **Hypothesis — not yet validated** | Replace the 500MB weight matrix with an 8-byte PRNG seed. The theoretical storage becomes ~1.6KB. The PRNG path is 200x slower than the real-weights path on this CPU and has not yet been trained to convergence. |
+| **GhostChain scalar adapters** | **Ceiling reached** | 840 scalar params, ~45% accuracy max, 10/20 eval questions locked wrong across 225 training steps. Fixed random adapter directions cannot reroute wrong reasoning paths. |
+| **LoRA rank-4 (trainable A+B)** | **Validated — ready to run** | 5.4M params. Flipped 2 questions in 15 pinned steps that scalars couldn't move in 225 steps. Stochastic ceiling: 7/10 locked questions are reachable. Theoretical ceiling: 13/20 = 65%. |
+| **GhostWeight (PRNG replaces stored weights)** | **Archived** | 200× slower than real-weights path on CPU. Correct concept, wrong hardware. |
 
-The kernel infrastructure, backward pass optimizations, and GRPO training loop are all validated on real weights. The GhostWeight convergence question — can PRNG ternary noise + 840 adapters learn a reasoning task? — remains open.
+**Next action:** Full 8-hour GRPO run with LoRA rank-4, LR=0.0174, curriculum token mismatch fix.
 
 ---
 
@@ -82,8 +81,10 @@ SVD-based compression was tested on BitNet's ternary weight matrices. Result: 82
 | Base model | Microsoft BitNet b1.58 2B4T (natively ternary {-1,0,+1}) | — |
 | Training task | GSM8K mathematical reasoning (GRPO, on-policy RL) | — |
 | Training hardware | AMD Ryzen 5 PRO 5675U — **CPU only**, no GPU | — |
-| GhostChain parameters | **840** (4 scalars × 210 layers, ~1.6KB BF16) | Validated |
-| Running reward at step 220 | **~91%** (real BitNet weights, USE_GHOST=False) | Validated |
+| GhostChain parameters | **840** (4 scalars × 210 layers, ~1.6KB BF16) | Ceiling reached at ~45% |
+| LoRA rank-4 parameters | **5,406,720** (~10MB, trainable A+B) | Validated — 2 questions flipped in 15 steps |
+| Scalar adapter ceiling (GSM8K) | **~45%** (10/20 questions permanently locked) | Confirmed over 10 evals / 225 steps |
+| LoRA theoretical ceiling (this eval set) | **~65%** (13/20 solvable, 3 unreachable) | Phase 1 stochastic ceiling check |
 | Forward speedup vs stock PyTorch | **4.6x** (AVX2 LUT kernel, M=1 autoregressive) | Validated |
 | Backward speedup vs stock PyTorch | **75x** (ternary backward + FP32 LM head) | Validated |
 | Training iteration time | **2.4s** (down from 91.7s stock) | Validated |

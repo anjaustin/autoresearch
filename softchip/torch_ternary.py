@@ -93,6 +93,44 @@ def _ensure_lib():
 
 
 # -----------------------------------------------------------------------
+# Load the base-3 MTFP kernel (v4) — 5 trits/byte, SSE LUT decoder
+# -----------------------------------------------------------------------
+_LIB_V4_PATH = _LIB_DIR / "ternary_matmul_v4.so"
+_lib_v4 = None
+
+
+def _try_load_lib_v4():
+    """Try to load v4 base-3 library. Returns True on success. Idempotent."""
+    global _lib_v4
+    if _lib_v4 is not None:
+        return True
+    if not _LIB_V4_PATH.exists():
+        return False
+    try:
+        lib = ctypes.CDLL(str(_LIB_V4_PATH))
+        _fptr = ctypes.POINTER(ctypes.c_float)
+        _u8p  = ctypes.POINTER(ctypes.c_uint8)
+
+        lib.pack_weights_b3.restype  = _u8p
+        lib.pack_weights_b3.argtypes = [_fptr, ctypes.c_int, ctypes.c_int,
+                                         ctypes.POINTER(ctypes.c_float)]
+
+        lib.ternary_matmul_b3.restype  = None
+        lib.ternary_matmul_b3.argtypes = [_u8p, _fptr, _fptr,
+                                           ctypes.c_int, ctypes.c_int,
+                                           ctypes.c_int, ctypes.c_float]
+
+        lib.ternary_matmul_b3_backward.restype  = None
+        lib.ternary_matmul_b3_backward.argtypes = [_u8p, _fptr, _fptr,
+                                                    ctypes.c_int, ctypes.c_int,
+                                                    ctypes.c_int, ctypes.c_float]
+        _lib_v4 = lib
+        return True
+    except (OSError, AttributeError):
+        return False
+
+
+# -----------------------------------------------------------------------
 # Load the Vulkan shared library
 # -----------------------------------------------------------------------
 _VK_LIB_PATH = _LIB_DIR / "libvk_ternary.so"
@@ -179,43 +217,54 @@ def _vk_device_name():
 
 
 # -----------------------------------------------------------------------
-# Load the GhostWeight shared library
+# Load the GhostWeight sign_epi8 shared library
 # -----------------------------------------------------------------------
-_GHOST_LIB_PATH = _LIB_DIR / "ghost_matmul.so"
-_ghost_lib = None
+_GHOST_SIGN_LIB_PATH = _LIB_DIR / "ghost_sign_epi8.so"
+_ghost_sign_lib = None
 
 
-def _ensure_ghost_lib():
-    global _ghost_lib
-    if _ghost_lib is not None:
-        return _ghost_lib
+def _mix_seed(base_seed, layer_id):
+    """Mix base_seed with layer_id to get a deterministic per-layer uint64 seed."""
+    z = (base_seed ^ (layer_id * 0xc2b2ae3537c2a475)) & 0xFFFFFFFFFFFFFFFF
+    z = ((z ^ (z >> 30)) * 0xbf58476d1ce4e5b9) & 0xFFFFFFFFFFFFFFFF
+    return z
 
-    if not _GHOST_LIB_PATH.exists():
-        raise RuntimeError(f"GhostWeight library not found at {_GHOST_LIB_PATH}.")
 
-    _ghost_lib = ctypes.CDLL(str(_GHOST_LIB_PATH))
+def _ensure_ghost_sign_lib():
+    global _ghost_sign_lib
+    if _ghost_sign_lib is not None:
+        return _ghost_sign_lib
 
-    _ghost_lib.ghost_matmul_forward.argtypes = [
-        ctypes.POINTER(ctypes.c_float),
-        ctypes.POINTER(ctypes.c_float),
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_uint64,
-        ctypes.c_int,
-        ctypes.c_float,
+    if not _GHOST_SIGN_LIB_PATH.exists():
+        raise RuntimeError(
+            f"GhostWeight sign_epi8 library not found at {_GHOST_SIGN_LIB_PATH}.\n"
+            f"Build with: bash {_LIB_DIR}/build_ghost_sign_epi8.sh"
+        )
+
+    _ghost_sign_lib = ctypes.CDLL(str(_GHOST_SIGN_LIB_PATH))
+
+    _fptr = ctypes.POINTER(ctypes.c_float)
+    _ghost_sign_lib.ghost_matmul_sign_epi8.restype = None
+    _ghost_sign_lib.ghost_matmul_sign_epi8.argtypes = [
+        _fptr,           # outs   [G × N]
+        _fptr,           # ins    [G × K]
+        ctypes.c_int,    # G
+        ctypes.c_int,    # K
+        ctypes.c_int,    # N
+        ctypes.c_uint64, # lseed
+        ctypes.c_float,  # scale
     ]
-    _ghost_lib.ghost_matmul_backward.argtypes = [
-        ctypes.POINTER(ctypes.c_float),
-        ctypes.POINTER(ctypes.c_float),
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_uint64,
-        ctypes.c_int,
-        ctypes.c_float,
+    _ghost_sign_lib.ghost_matmul_sign_epi8_backward.restype = None
+    _ghost_sign_lib.ghost_matmul_sign_epi8_backward.argtypes = [
+        _fptr,           # grad_ins  [G × K]
+        _fptr,           # grad_outs [G × N]
+        ctypes.c_int,    # G
+        ctypes.c_int,    # K
+        ctypes.c_int,    # N
+        ctypes.c_uint64, # lseed
+        ctypes.c_float,  # scale
     ]
-    return _ghost_lib
+    return _ghost_sign_lib
 
 
 # -----------------------------------------------------------------------
@@ -295,28 +344,21 @@ class TernaryMatmulFunction(torch.autograd.Function):
         pw = packed_weight
 
         orig_shape = input_tensor.shape
-        x_2d = input_tensor.reshape(-1, pw.in_features)
+        x_2d  = input_tensor.reshape(-1, pw.in_features).float().contiguous()
         batch = x_2d.shape[0]
-
-        x_f32 = x_2d.float().contiguous().numpy()
-        x_ptr = x_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-
-        out_f32 = np.empty((batch, pw.out_features), dtype=np.float32)
-        out_ptr = out_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        out_t = torch.empty(batch, pw.out_features, dtype=torch.float32)
 
         lib.ternary_matmul(
             pw.packed_ptr,
-            x_ptr,
-            out_ptr,
+            ctypes.cast(x_2d.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+            ctypes.cast(out_t.data_ptr(), ctypes.POINTER(ctypes.c_float)),
             batch,
             pw.out_features,
             pw.in_features,
             pw.weight_scale,
         )
 
-        output = torch.from_numpy(out_f32).to(
-            device=input_tensor.device, dtype=input_tensor.dtype
-        )
+        output = out_t.to(device=input_tensor.device, dtype=input_tensor.dtype)
         output = output.reshape(*orig_shape[:-1], pw.out_features)
 
         # Save packed weight info for backward (not input_tensor — not needed)
@@ -330,30 +372,113 @@ class TernaryMatmulFunction(torch.autograd.Function):
         pw = ctx.packed_weight
 
         # grad_output: (*orig_shape[:-1], out_features)
-        go_2d = grad_output.reshape(-1, pw.out_features)
+        go_2d = grad_output.reshape(-1, pw.out_features).float().contiguous()
         batch = go_2d.shape[0]
-
-        go_f32 = go_2d.float().contiguous().numpy()
-        go_ptr = go_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-
-        gi_f32 = np.empty((batch, pw.in_features), dtype=np.float32)
-        gi_ptr = gi_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        gi_t  = torch.empty(batch, pw.in_features, dtype=torch.float32)
 
         lib.ternary_matmul_backward(
             pw.packed_ptr,
-            go_ptr,
-            gi_ptr,
+            ctypes.cast(go_2d.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+            ctypes.cast(gi_t.data_ptr(), ctypes.POINTER(ctypes.c_float)),
             batch,
             pw.out_features,
             pw.in_features,
             pw.weight_scale,
         )
 
-        grad_input = torch.from_numpy(gi_f32).to(
-            device=grad_output.device, dtype=grad_output.dtype
-        )
+        grad_input = gi_t.to(device=grad_output.device, dtype=grad_output.dtype)
         grad_input = grad_input.reshape(*ctx.orig_shape)
 
+        return grad_input, None, None
+
+
+# -----------------------------------------------------------------------
+# Base-3 packed weight (v4 MTFP) — 5 trits/byte, 25% denser than 2-bit
+# -----------------------------------------------------------------------
+class PackedWeightB3:
+    """Holds a base-3 packed weight matrix for one AutoBitLinear layer."""
+
+    __slots__ = ("packed_ptr", "weight_scale", "out_features", "in_features", "k_bytes")
+
+    def __init__(self, weight_tensor):
+        lib = _lib_v4
+        w_f32 = weight_tensor.float().contiguous()
+        self.out_features, self.in_features = w_f32.shape
+        self.k_bytes = (self.in_features + 4) // 5
+
+        scale = ctypes.c_float(0.0)
+        self.packed_ptr = lib.pack_weights_b3(
+            ctypes.cast(w_f32.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+            self.out_features,
+            self.in_features,
+            ctypes.byref(scale),
+        )
+        self.weight_scale = scale.value
+
+    def __del__(self):
+        if hasattr(self, "packed_ptr") and self.packed_ptr:
+            try:
+                ctypes.CDLL("libc.so.6").free(self.packed_ptr)
+            except Exception:
+                pass
+
+
+class TernaryMatmulV4Function(torch.autograd.Function):
+    """
+    Forward: base-3 MTFP ternary matmul via SSE LUT decoder (v4 kernel).
+    Backward: STE — same base-3 weights transposed, scatter-add.
+
+    No numpy on the hot path — tensor data_ptr() passed directly to C.
+    """
+
+    @staticmethod
+    def forward(ctx, input_tensor, packed_weight, original_layer):
+        lib = _lib_v4
+        pw  = packed_weight
+
+        orig_shape = input_tensor.shape
+        x_2d  = input_tensor.reshape(-1, pw.in_features).float().contiguous()
+        batch = x_2d.shape[0]
+        out_t = torch.empty(batch, pw.out_features, dtype=torch.float32)
+
+        lib.ternary_matmul_b3(
+            pw.packed_ptr,
+            ctypes.cast(x_2d.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+            ctypes.cast(out_t.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+            batch,
+            pw.out_features,
+            pw.in_features,
+            pw.weight_scale,
+        )
+
+        output = out_t.to(device=input_tensor.device, dtype=input_tensor.dtype)
+        output = output.reshape(*orig_shape[:-1], pw.out_features)
+
+        ctx.packed_weight = packed_weight
+        ctx.orig_shape    = orig_shape
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        lib = _lib_v4
+        pw  = ctx.packed_weight
+
+        go_2d = grad_output.reshape(-1, pw.out_features).float().contiguous()
+        batch = go_2d.shape[0]
+        gi_t  = torch.empty(batch, pw.in_features, dtype=torch.float32)
+
+        lib.ternary_matmul_b3_backward(
+            pw.packed_ptr,
+            ctypes.cast(go_2d.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+            ctypes.cast(gi_t.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+            batch,
+            pw.out_features,
+            pw.in_features,
+            pw.weight_scale,
+        )
+
+        grad_input = gi_t.to(device=grad_output.device, dtype=grad_output.dtype)
+        grad_input = grad_input.reshape(*ctx.orig_shape)
         return grad_input, None, None
 
 
@@ -441,6 +566,75 @@ class GhostMatmulFunction(torch.autograd.Function):
         return grad_input, None, None, None, None
 
 
+class GhostSignEpi8MatmulFunction(torch.autograd.Function):
+    """
+    Forward: PRNG ternary matmul via _mm256_sign_epi8 (ghost_sign_epi8.so).
+    Backward: STE — same PRNG weight matrix transposed, float accumulation.
+
+    Takes a pre-mixed lseed (combine base_seed + layer_id via _mix_seed()
+    before calling apply). This is 1.57x faster than the LUT float path and
+    avoids storing the full weight matrix (PRNG-on-the-fly).
+    """
+
+    @staticmethod
+    def forward(ctx, input_tensor, lseed, in_features, out_features, weight_scale):
+        lib = _ensure_ghost_sign_lib()
+
+        orig_shape = input_tensor.shape
+        x_2d = input_tensor.reshape(-1, in_features)
+        G = x_2d.shape[0]
+
+        x_f32 = x_2d.float().contiguous().numpy()
+        x_ptr = x_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        out_f32 = np.empty((G, out_features), dtype=np.float32)
+        out_ptr = out_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        lib.ghost_matmul_sign_epi8(
+            out_ptr, x_ptr,
+            G, in_features, out_features,
+            ctypes.c_uint64(lseed), ctypes.c_float(weight_scale),
+        )
+
+        output = torch.from_numpy(out_f32).to(
+            device=input_tensor.device, dtype=input_tensor.dtype
+        )
+        output = output.reshape(*orig_shape[:-1], out_features)
+
+        ctx.lseed = lseed
+        ctx.in_features = in_features
+        ctx.out_features = out_features
+        ctx.weight_scale = weight_scale
+        ctx.orig_shape = orig_shape
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        lib = _ensure_ghost_sign_lib()
+
+        go_2d = grad_output.reshape(-1, ctx.out_features)
+        G = go_2d.shape[0]
+
+        go_f32 = go_2d.float().contiguous().numpy()
+        go_ptr = go_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        gi_f32 = np.empty((G, ctx.in_features), dtype=np.float32)
+        gi_ptr = gi_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        lib.ghost_matmul_sign_epi8_backward(
+            gi_ptr, go_ptr,
+            G, ctx.in_features, ctx.out_features,
+            ctypes.c_uint64(ctx.lseed), ctypes.c_float(ctx.weight_scale),
+        )
+
+        grad_input = torch.from_numpy(gi_f32).to(
+            device=grad_output.device, dtype=grad_output.dtype
+        )
+        grad_input = grad_input.reshape(*ctx.orig_shape)
+        # Gradients for: input_tensor, lseed, in_features, out_features, weight_scale
+        return grad_input, None, None, None, None
+
+
 class VulkanMatmulFunction(torch.autograd.Function):
     """
     Forward: use Vulkan iGPU compute shader (fastest for M=1)
@@ -510,11 +704,11 @@ def patch_model(model, backend="auto", verbose=True, use_ghost=False, ghost_seed
     Returns:
         Number of layers patched
     """
-    # GhostWeight path: skip weight packing entirely, use PRNG kernel
+    # GhostWeight path: skip weight packing entirely, use sign_epi8 PRNG kernel
     if use_ghost:
-        _ensure_ghost_lib()
+        _ensure_ghost_sign_lib()
         if verbose:
-            print(f"Soft-chip: using GhostWeight backend (seed={ghost_seed})")
+            print(f"Soft-chip: using GhostWeight sign_epi8 backend (seed={ghost_seed})")
 
         # Load pre-extracted scales if available (avoids loading 4.83GB BF16)
         _ghost_scales = {}
@@ -523,9 +717,8 @@ def patch_model(model, backend="auto", verbose=True, use_ghost=False, ghost_seed
             'models/bitnet-b1.58-2B-4T-bf16/weight_scales.pt',
         ]
         for _sp in _scales_search:
-            if _sp and __import__('os').path.exists(_sp):
-                import torch as _t
-                _ghost_scales = _t.load(_sp, weights_only=True)
+            if _sp and os.path.exists(_sp):
+                _ghost_scales = torch.load(_sp, weights_only=True)
                 if verbose:
                     print(f'Soft-chip: loaded {len(_ghost_scales)} pre-extracted scales from {_sp}')
                 break
@@ -540,30 +733,33 @@ def patch_model(model, backend="auto", verbose=True, use_ghost=False, ghost_seed
             out_features, in_features = module.weight.shape
 
             # Load weight scale from pre-extracted file if available,
-            # otherwise compute from BF16 weights (slow path)
-            if _ghost_scales and name in _ghost_scales:
-                weight_scale = _ghost_scales[name]
+            # otherwise compute from BF16 weights (slow path).
+            # After inject_adapters(), AutoBitLinear is at "...proj.base_layer"
+            # but weight_scales.pt keys are "...proj" (pre-inject names).
+            lookup_name = name[:-len(".base_layer")] if name.endswith(".base_layer") else name
+            if _ghost_scales and lookup_name in _ghost_scales:
+                weight_scale = float(_ghost_scales[lookup_name])
             else:
-                weight_scale = module.weight.abs().mean().item()
+                weight_scale = float(module.weight.abs().mean().item())
 
             layer_id = count  # stable index across calls
+            lseed = _mix_seed(ghost_seed, layer_id)
 
             setattr(module, _PATCH_ATTR, module.forward)
-            setattr(module, _BACKEND_ATTR, "ghost")
+            setattr(module, _BACKEND_ATTR, "ghost_sign_epi8")
 
-            def make_ghost_forward(lid, K, N, seed, scale):
+            def make_ghost_forward(K, N, ls, scale):
                 def patched_forward(x):
-                    return GhostMatmulFunction.apply(x, seed, lid, K, N, scale)
-
+                    return GhostSignEpi8MatmulFunction.apply(x, ls, K, N, scale)
                 return patched_forward
 
             module.forward = make_ghost_forward(
-                layer_id, in_features, out_features, ghost_seed, weight_scale
+                in_features, out_features, lseed, weight_scale
             )
             count += 1
 
         if verbose:
-            print(f"Soft-chip: patched {count} AutoBitLinear layers [GhostWeight]")
+            print(f"Soft-chip: patched {count} AutoBitLinear layers [GhostWeight sign_epi8]")
         return count
 
     _ensure_lib()
@@ -585,11 +781,17 @@ def patch_model(model, backend="auto", verbose=True, use_ghost=False, ghost_seed
             f"Unknown backend: {backend!r}. Use 'vulkan', 'cpu', or 'auto'"
         )
 
+    # v4 (base-3 MTFP) is 20% denser than v3 but FMA-throughput-limited at M=1.
+    # Enable when batch sizes are large enough to be bandwidth-limited.
+    _has_v4 = False  # not use_vulkan and _try_load_lib_v4()
+
     if verbose and use_vulkan:
         dev = _vk_device_name() or "unknown"
         print(f"Soft-chip: using Vulkan backend ({dev})")
+    elif verbose and _has_v4:
+        print("Soft-chip: using CPU (base-3 MTFP/v4) backend")
     elif verbose:
-        print("Soft-chip: using CPU (AVX2) backend")
+        print("Soft-chip: using CPU (AVX2/v3) backend")
 
     count = 0
     vk_count = 0
@@ -602,29 +804,33 @@ def patch_model(model, backend="auto", verbose=True, use_ghost=False, ghost_seed
 
         # Pack weights (and upload to GPU if using Vulkan)
         t0 = time.time()
-        packed = PackedWeight(module.weight.data, upload_vulkan=use_vulkan)
+        if _has_v4:
+            packed = PackedWeightB3(module.weight.data)
+            layer_use_vulkan = False
+        else:
+            packed = PackedWeight(module.weight.data, upload_vulkan=use_vulkan)
+            layer_use_vulkan = use_vulkan and packed.vk_layer_id >= 0
         pack_time = time.time() - t0
         total_pack_time += pack_time
 
-        # Determine per-layer backend
-        layer_use_vulkan = use_vulkan and packed.vk_layer_id >= 0
-
         # Store packed weight, original forward, and backend on the module
+        backend_tag = "vulkan" if layer_use_vulkan else ("cpu-v4" if _has_v4 else "cpu-v3")
         setattr(module, _PACKED_ATTR, packed)
         setattr(module, _PATCH_ATTR, module.forward)
-        setattr(module, _BACKEND_ATTR, "vulkan" if layer_use_vulkan else "cpu")
+        setattr(module, _BACKEND_ATTR, backend_tag)
 
         # Create patched forward
-        def make_forward(mod, pw, is_vulkan):
+        def make_forward(mod, pw, is_vulkan, use_v4):
             def patched_forward(x):
                 if is_vulkan:
                     return VulkanMatmulFunction.apply(x, pw, mod)
+                elif use_v4:
+                    return TernaryMatmulV4Function.apply(x, pw, mod)
                 else:
                     return TernaryMatmulFunction.apply(x, pw, mod)
-
             return patched_forward
 
-        module.forward = make_forward(module, packed, layer_use_vulkan)
+        module.forward = make_forward(module, packed, layer_use_vulkan, _has_v4)
         count += 1
         if layer_use_vulkan:
             vk_count += 1
@@ -636,9 +842,12 @@ def patch_model(model, backend="auto", verbose=True, use_ghost=False, ghost_seed
             print("  Warning: vk_finalize_layers() failed, using legacy path")
 
     if verbose:
-        backend_str = (
-            f"{vk_count} Vulkan + {count - vk_count} CPU" if vk_count else "CPU"
-        )
+        if vk_count:
+            backend_str = f"{vk_count} Vulkan + {count - vk_count} CPU"
+        elif _has_v4:
+            backend_str = "CPU base-3 MTFP"
+        else:
+            backend_str = "CPU"
         print(
             f"Soft-chip: patched {count} AutoBitLinear layers "
             f"[{backend_str}] (weight packing: {total_pack_time:.1f}s)"

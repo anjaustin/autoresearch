@@ -33,9 +33,10 @@ LOG_FILE = "grpo_log.jsonl"
 
 # GRPO hyperparameters
 GROUP_SIZE = 4
-TEMPERATURE = 0.7
+TEMPERATURE = 0.963
 TOP_P = 0.9
-MAX_NEW_TOKENS = 96
+MAX_NEW_TOKENS = 256
+CURRICULUM_MAX_TOKENS = 96   # token budget for curriculum pre-checks (shorter = faster scans)
 BETA_KL = 0.0  # GhostWeight: π_ref is random noise
 LEARNING_RATE = 0.01
 LR_MIN = 0.001
@@ -549,20 +550,27 @@ def evaluate(
 
 def find_hard_problem(model, engine, adapters, tokenizer, train_data, start_idx):
     """
-    Scan forward from start_idx to find a problem the current model fails on
-    (greedy decode at temp=0.0, reward=0).
+    Two-step curriculum filter: find a problem in the borderline zone where
+    the model fails greedily but can sometimes succeed with sampling.
+
+    Step 1 — greedy check (temp=0): must fail (not too easy).
+    Step 2 — stochastic check (temp=TEMPERATURE, n=1): prefer to succeed
+              (confirms the problem is learnable, not just impossible).
+
+    If a borderline problem is found (step 1 fail + step 2 succeed), return it
+    immediately — this nearly guarantees mixed rewards in the main GROUP_SIZE
+    rollout, eliminating the dominant source of wasted compute (83% skip rate).
+
+    Fallback: if no stochastic success is found within CURRICULUM_SKIP_MAX
+    candidates, return the first greedy-fail found.  This preserves current
+    behavior when USE_GHOST=True (near-zero base accuracy makes stochastic
+    success rare) or when the model is in a temporary hard patch.
 
     Returns (problem, new_idx, n_scanned, found_hard).
-
-    Uses strict_extract_answer (no last-number fallback) for the pre-check so
-    that a problem is only marked "solved" if the model produces an explicit
-    answer format.  This prevents the last-number fallback from incorrectly
-    excluding hard problems from the curriculum.
-
-    If no hard problem is found in CURRICULUM_SKIP_MAX tries, returns
-    found_hard=False.  The caller should skip the step rather than training on
-    an easy problem (which would reintroduce the 81%-skip problem we fixed).
     """
+    first_hard_ex = None
+    first_hard_idx = None
+
     for n in range(CURRICULUM_SKIP_MAX):
         ex = train_data[start_idx % len(train_data)]
         start_idx += 1
@@ -570,13 +578,34 @@ def find_hard_problem(model, engine, adapters, tokenizer, train_data, start_idx)
         if gt is None:
             continue
         prompt_ids = tokenizer(format_prompt(ex["question"]), return_tensors="pt").input_ids
-        comp_ids = rollout(model, tokenizer, adapters, engine, prompt_ids, 1, MAX_NEW_TOKENS, temp=0.0)
+
+        # Step 1: greedy check — filter out questions the model already solves
+        # Uses CURRICULUM_MAX_TOKENS (shorter than MAX_NEW_TOKENS) to keep scans fast.
+        comp_ids = rollout(model, tokenizer, adapters, engine, prompt_ids, 1, CURRICULUM_MAX_TOKENS, temp=0.0)
         pred = strict_extract_answer(
             tokenizer.decode(comp_ids[0, prompt_ids.shape[1] :], skip_special_tokens=True)
         )
-        if not answers_match(pred, gt):
-            return ex, start_idx, n + 1, True  # found a hard problem
-    return None, start_idx, CURRICULUM_SKIP_MAX, False  # exhausted — no hard problem found
+        if answers_match(pred, gt):
+            continue  # too easy — skip
+
+        # Save first greedy-fail as fallback
+        if first_hard_ex is None:
+            first_hard_ex = ex
+            first_hard_idx = start_idx
+
+        # Step 2: stochastic check — prefer borderline problems the model can
+        # sometimes solve (guarantees mixed rewards in main rollout)
+        comp_ids_s = rollout(model, tokenizer, adapters, engine, prompt_ids, 1, CURRICULUM_MAX_TOKENS, temp=TEMPERATURE)
+        pred_s = extract_answer(
+            tokenizer.decode(comp_ids_s[0, prompt_ids.shape[1] :], skip_special_tokens=True)
+        )
+        if answers_match(pred_s, gt):
+            return ex, start_idx, n + 1, True  # borderline found
+
+    # Fallback: return first greedy-fail if stochastic check never confirmed
+    if first_hard_ex is not None:
+        return first_hard_ex, first_hard_idx, CURRICULUM_SKIP_MAX, True
+    return None, start_idx, CURRICULUM_SKIP_MAX, False  # exhausted
 
 
 # ---------------------------------------------------------------------------

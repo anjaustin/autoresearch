@@ -18,15 +18,28 @@ gcc -O3 -mavx2 -mfma -march=native -fopenmp -shared -fPIC \
     -lm
 echo "  Done: ${SCRIPT_DIR}/ternary_matmul_v3.so"
 
-# Optional: also build the standalone benchmark binary
+echo "Building ternary_matmul_v4.so (base-3 MTFP, 5 trits/byte)..."
+gcc -O3 -mavx2 -mfma -msse4.1 -march=native -fopenmp -shared -fPIC \
+    -o "${SCRIPT_DIR}/ternary_matmul_v4.so" \
+    "${SCRIPT_DIR}/ternary_matmul_v4.c" \
+    -lm
+echo "  Done: ${SCRIPT_DIR}/ternary_matmul_v4.so"
+
+# Optional: also build standalone benchmark binaries
 if [ "${1}" = "--bench" ]; then
-    echo "Building standalone benchmark..."
+    echo "Building standalone benchmarks..."
     gcc -O3 -mavx2 -mfma -march=native -fopenmp -DSTANDALONE_TEST \
         -o "${SCRIPT_DIR}/ternary_bench_v3" \
         "${SCRIPT_DIR}/ternary_matmul_v3.c" \
         -lm
     echo "  Done: ${SCRIPT_DIR}/ternary_bench_v3"
-    echo "  Run: ${SCRIPT_DIR}/ternary_bench_v3"
+
+    gcc -O3 -mavx2 -mfma -msse4.1 -march=native -fopenmp -DSTANDALONE_BENCH \
+        -o "${SCRIPT_DIR}/ternary_bench_v4" \
+        "${SCRIPT_DIR}/ternary_matmul_v4.c" \
+        -lm
+    echo "  Done: ${SCRIPT_DIR}/ternary_bench_v4"
+    echo "  Run: ${SCRIPT_DIR}/ternary_bench_v4"
 fi
 
 echo "Build complete. Verify with: python test_softchip_accuracy.py"
